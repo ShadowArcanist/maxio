@@ -1,0 +1,154 @@
+# Maxio
+
+S3-compatible object storage server written in Rust. Single-binary replacement for MinIO.
+
+## Build & Run
+
+```bash
+cargo build --release
+./target/release/maxio --data-dir ./data --port 9000
+```
+
+Environment variables: `MAXIO_PORT`, `MAXIO_ADDRESS`, `MAXIO_DATA_DIR`, `MAXIO_ACCESS_KEY`, `MAXIO_SECRET_KEY`, `MAXIO_REGION`
+
+Defaults: port 9000, access/secret `minioadmin`/`minioadmin`, region `us-east-1`
+
+## Development Workflow
+
+**Test-Driven Development (TDD)**: Before implementing any new function or feature, write a failing test first. Then implement until the test passes.
+
+**After every code change**, re-run the full test suite to catch regressions:
+
+```bash
+# 1. Unit + integration tests (always run first, no server needed)
+cargo test
+
+# 2. mc integration tests (start server, run tests, stop server)
+cargo build && RUST_LOG=info ./target/debug/maxio --data-dir /tmp/maxio-test --port 9876 &
+./tests/mc_test.sh 9876 /tmp/maxio-test
+kill %1 && rm -rf /tmp/maxio-test
+
+# 3. AWS CLI integration tests (start server, run tests, stop server)
+cargo build && RUST_LOG=info ./target/debug/maxio --data-dir /tmp/maxio-test --port 9876 &
+./tests/aws_cli_test.sh 9876 /tmp/maxio-test
+kill %1 && rm -rf /tmp/maxio-test
+```
+
+**Hot-reload dev server** (for manual testing):
+
+```bash
+RUST_LOG=debug cargo watch -x 'run -- --data-dir ./data'
+```
+
+## Architecture
+
+### Module Layout
+
+- `src/main.rs` — entry point, config, server start, graceful shutdown
+- `src/config.rs` — CLI args + env vars via clap derive
+- `src/server.rs` — Axum router construction, AppState, middleware wiring
+- `src/error.rs` — S3Error with XML error response rendering
+- `src/auth/` — AWS Signature V4 verification + Axum middleware
+- `src/api/` — S3 API handlers (bucket.rs, object.rs, list.rs, router.rs)
+- `src/storage/` — Filesystem storage (buckets as dirs, objects as files, JSON sidecar metadata)
+- `src/xml/` — S3 XML response types (serde + quick-xml)
+
+### Key Design Decisions
+
+- **Pure filesystem storage**: No database. Buckets are directories, objects are files at their key path, metadata in `.meta.json` sidecars. Backup-friendly — just copy the data dir
+- **Storage layout**: `{data_dir}/buckets/{bucket-name}/{key-path}` for data, `{key-path}.meta.json` for metadata, `.bucket.json` for bucket metadata
+- **Path-style only**: `/{bucket}/{key}` routing. No virtual-hosted-style yet
+- **UNSIGNED-PAYLOAD accepted**: Skips body hashing for PutObject (AWS CLI default)
+- **Future web console**: Reserved `/ui/` route namespace. Separate auth (cookies, not SigV4)
+
+### Data Layout
+
+```
+{data_dir}/
+└── buckets/
+    └── my-bucket/
+        ├── .bucket.json                    # bucket metadata
+        ├── photos/
+        │   ├── vacation.jpg                # object data
+        │   └── vacation.jpg.meta.json      # object metadata (etag, size, content_type, last_modified)
+        └── readme.txt
+            └── readme.txt.meta.json
+```
+
+### S3 Operations Implemented (Phase 1)
+
+| Operation | Method | Path |
+|---|---|---|
+| ListBuckets | GET | `/` |
+| CreateBucket | PUT | `/{bucket}` |
+| HeadBucket | HEAD | `/{bucket}` |
+| DeleteBucket | DELETE | `/{bucket}` |
+| GetBucketLocation | GET | `/{bucket}?location` |
+| ListObjectsV2 | GET | `/{bucket}?list-type=2` |
+| PutObject | PUT | `/{bucket}/{key}` |
+| GetObject | GET | `/{bucket}/{key}` |
+| HeadObject | HEAD | `/{bucket}/{key}` |
+| DeleteObject | DELETE | `/{bucket}/{key}` |
+
+### Testing with MinIO Client (mc)
+
+```bash
+# Install mc
+brew install minio/stable/mc
+
+# Configure alias
+mc alias set maxio http://localhost:9000 minioadmin minioadmin
+
+# Bucket operations
+mc mb maxio/test-bucket
+mc ls maxio/
+
+# Upload / download
+echo "hello maxio" > /tmp/test.txt
+mc cp /tmp/test.txt maxio/test-bucket/test.txt
+mc ls maxio/test-bucket/
+mc cat maxio/test-bucket/test.txt
+mc cp maxio/test-bucket/test.txt /tmp/downloaded.txt
+
+# Nested keys
+mc cp /tmp/test.txt maxio/test-bucket/folder/nested/file.txt
+mc ls maxio/test-bucket/folder/
+
+# Cleanup
+mc rm maxio/test-bucket/test.txt
+mc rm maxio/test-bucket/folder/nested/file.txt
+mc rb maxio/test-bucket
+```
+
+### Testing with AWS CLI
+
+```bash
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+aws --endpoint-url http://localhost:9000 s3 mb s3://test-bucket
+aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://test-bucket/file.txt
+aws --endpoint-url http://localhost:9000 s3 ls s3://test-bucket/
+aws --endpoint-url http://localhost:9000 s3 cp s3://test-bucket/file.txt downloaded.txt
+aws --endpoint-url http://localhost:9000 s3 rm s3://test-bucket/file.txt
+aws --endpoint-url http://localhost:9000 s3 rb s3://test-bucket
+```
+
+### Running Tests
+
+```bash
+# Unit + integration tests (no server needed)
+cargo test
+
+# mc integration tests (requires running server)
+RUST_LOG=debug cargo watch -x 'run -- --data-dir ./data' &
+./tests/mc_test.sh
+
+# AWS CLI integration tests (requires running server)
+./tests/aws_cli_test.sh
+```
+
+## Roadmap
+
+- **Phase 2**: Multipart upload, presigned URLs, CopyObject, DeleteObjects batch, CORS, Range headers
+- **Phase 3**: Web console (SPA at `/ui/`), versioning, lifecycle rules, multi-user, metrics
+- **Phase 4**: Distributed mode, erasure coding, replication

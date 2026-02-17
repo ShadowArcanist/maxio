@@ -1,0 +1,47 @@
+[package]
+name = "maxio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# HTTP server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = "1"
+http = "1"
+bytes = "1"
+
+# XML
+quick-xml = { version = "0.37", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Auth / crypto
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config
+clap = { version = "4", features = ["derive", "env"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+md-5 = "0.10"
+percent-encoding = "2"
+thiserror = "2"
+anyhow = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-trait = "0.1"
+base64 = "0.22"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
