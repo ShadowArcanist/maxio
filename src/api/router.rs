@@ -23,6 +23,7 @@ pub fn s3_router() -> Router<AppState> {
         .route("/{bucket}", post(object::delete_objects))
         .route("/{bucket}/", post(object::delete_objects))
         // Object routes
+        .route("/{bucket}/{*key}", post(object::post_object))
         .route("/{bucket}/{*key}", put(object::put_object))
         .route("/{bucket}/{*key}", get(object::get_object))
         .route("/{bucket}/{*key}", head(object::head_object))

@@ -395,6 +395,14 @@ async fn s3_put_chunked(
         .unwrap()
 }
 
+fn extract_xml_tag(body: &str, tag: &str) -> Option<String> {
+    let start = format!("<{}>", tag);
+    let end = format!("</{}>", tag);
+    let from = body.find(&start)? + start.len();
+    let to = body[from..].find(&end)? + from;
+    Some(body[from..to].to_string())
+}
+
 
 // ---- Tests ----
 
@@ -968,4 +976,247 @@ async fn test_chunked_upload_multi_chunk() {
         resp.headers().get("content-length").unwrap(),
         &total_len.to_string()
     );
+}
+
+#[tokio::test]
+async fn test_multipart_create_upload() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+
+    let resp = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    let upload_id = extract_xml_tag(&body, "UploadId").unwrap();
+    assert!(!upload_id.is_empty());
+}
+
+#[tokio::test]
+async fn test_multipart_upload_part() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let resp = s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=1&uploadId={}", base_url, upload_id),
+        b"part-one".to_vec(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let etag = resp.headers().get("etag").unwrap().to_str().unwrap();
+    assert!(etag.starts_with('"') && etag.ends_with('"'));
+}
+
+#[tokio::test]
+async fn test_multipart_complete() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let p1 = vec![b'a'; 5 * 1024 * 1024];
+    let p2 = b"tail".to_vec();
+    let r1 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=1&uploadId={}", base_url, upload_id),
+        p1.clone(),
+    )
+    .await;
+    let e1 = r1.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let r2 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=2&uploadId={}", base_url, upload_id),
+        p2.clone(),
+    )
+    .await;
+    let e2 = r2.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        e1, e2
+    );
+    let complete = s3_request(
+        "POST",
+        &format!("{}/mybucket/large.bin?uploadId={}", base_url, upload_id),
+        complete_xml.into_bytes(),
+    )
+    .await;
+    assert_eq!(complete.status(), 200);
+
+    let get = s3_request("GET", &format!("{}/mybucket/large.bin", base_url), vec![]).await;
+    assert_eq!(get.status(), 200);
+    let body = get.bytes().await.unwrap();
+    let mut expected = p1;
+    expected.extend_from_slice(&p2);
+    assert_eq!(body.as_ref(), expected.as_slice());
+}
+
+#[tokio::test]
+async fn test_multipart_complete_part_too_small() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let r1 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=1&uploadId={}", base_url, upload_id),
+        b"tiny".to_vec(),
+    )
+    .await;
+    let e1 = r1.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let r2 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=2&uploadId={}", base_url, upload_id),
+        b"tail".to_vec(),
+    )
+    .await;
+    let e2 = r2.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        e1, e2
+    );
+    let complete = s3_request(
+        "POST",
+        &format!("{}/mybucket/large.bin?uploadId={}", base_url, upload_id),
+        complete_xml.into_bytes(),
+    )
+    .await;
+    assert_eq!(complete.status(), 400);
+    let body = complete.text().await.unwrap();
+    assert!(body.contains("<Code>EntityTooSmall</Code>"));
+}
+
+#[tokio::test]
+async fn test_multipart_abort() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let abort = s3_request(
+        "DELETE",
+        &format!("{}/mybucket/large.bin?uploadId={}", base_url, upload_id),
+        vec![],
+    )
+    .await;
+    assert_eq!(abort.status(), 204);
+}
+
+#[tokio::test]
+async fn test_multipart_list_parts() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    s3_request(
+        "PUT",
+        &format!("{}/mybucket/large.bin?partNumber=1&uploadId={}", base_url, upload_id),
+        b"part-one".to_vec(),
+    )
+    .await;
+
+    let list = s3_request(
+        "GET",
+        &format!("{}/mybucket/large.bin?uploadId={}", base_url, upload_id),
+        vec![],
+    )
+    .await;
+    assert_eq!(list.status(), 200);
+    let body = list.text().await.unwrap();
+    assert!(body.contains("<PartNumber>1</PartNumber>"));
+}
+
+#[tokio::test]
+async fn test_multipart_list_uploads() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/large.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let list = s3_request("GET", &format!("{}/mybucket?uploads=", base_url), vec![]).await;
+    assert_eq!(list.status(), 200);
+    let body = list.text().await.unwrap();
+    assert!(body.contains(&upload_id));
+    assert!(body.contains("<Key>large.bin</Key>"));
+}
+
+#[tokio::test]
+async fn test_multipart_no_such_upload() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+
+    let resp = s3_request(
+        "GET",
+        &format!("{}/mybucket/missing.bin?uploadId=does-not-exist", base_url),
+        vec![],
+    )
+    .await;
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<Code>NoSuchUpload</Code>"));
+}
+
+#[tokio::test]
+async fn test_multipart_excluded_from_list_objects() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/in-progress.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+    s3_request(
+        "PUT",
+        &format!(
+            "{}/mybucket/in-progress.bin?partNumber=1&uploadId={}",
+            base_url, upload_id
+        ),
+        b"partial".to_vec(),
+    )
+    .await;
+
+    let list = s3_request("GET", &format!("{}/mybucket?list-type=2", base_url), vec![]).await;
+    assert_eq!(list.status(), 200);
+    let body = list.text().await.unwrap();
+    assert!(!body.contains("in-progress.bin"));
+}
+
+#[tokio::test]
+async fn test_multipart_etag_format() {
+    let (base_url, _tmp) = start_server().await;
+    s3_request("PUT", &format!("{}/mybucket", base_url), vec![]).await;
+    let create = s3_request("POST", &format!("{}/mybucket/etag.bin?uploads=", base_url), vec![]).await;
+    let upload_id = extract_xml_tag(&create.text().await.unwrap(), "UploadId").unwrap();
+
+    let p1 = vec![b'a'; 5 * 1024 * 1024];
+    let p2 = b"tail".to_vec();
+    let r1 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/etag.bin?partNumber=1&uploadId={}", base_url, upload_id),
+        p1,
+    )
+    .await;
+    let e1 = r1.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let r2 = s3_request(
+        "PUT",
+        &format!("{}/mybucket/etag.bin?partNumber=2&uploadId={}", base_url, upload_id),
+        p2,
+    )
+    .await;
+    let e2 = r2.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        e1, e2
+    );
+    let complete = s3_request(
+        "POST",
+        &format!("{}/mybucket/etag.bin?uploadId={}", base_url, upload_id),
+        complete_xml.into_bytes(),
+    )
+    .await;
+    let body = complete.text().await.unwrap();
+    let etag = extract_xml_tag(&body, "ETag").unwrap();
+    assert!(etag.starts_with('"') && etag.ends_with('"'));
+    assert!(etag.contains("-2"));
 }

@@ -19,10 +19,13 @@ pub enum S3ErrorCode {
     InvalidAccessKeyId,
     InvalidArgument,
     InvalidBucketName,
+    InvalidPart,
     MalformedXML,
     NoSuchBucket,
     NoSuchKey,
+    NoSuchUpload,
     NotImplemented,
+    EntityTooSmall,
     SignatureDoesNotMatch,
 }
 
@@ -37,10 +40,13 @@ impl S3ErrorCode {
             Self::InvalidAccessKeyId => "InvalidAccessKeyId",
             Self::InvalidArgument => "InvalidArgument",
             Self::InvalidBucketName => "InvalidBucketName",
+            Self::InvalidPart => "InvalidPart",
             Self::MalformedXML => "MalformedXML",
             Self::NoSuchBucket => "NoSuchBucket",
             Self::NoSuchKey => "NoSuchKey",
+            Self::NoSuchUpload => "NoSuchUpload",
             Self::NotImplemented => "NotImplemented",
+            Self::EntityTooSmall => "EntityTooSmall",
             Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
         }
     }
@@ -50,7 +56,7 @@ impl S3ErrorCode {
             Self::AccessDenied | Self::InvalidAccessKeyId | Self::SignatureDoesNotMatch => {
                 StatusCode::FORBIDDEN
             }
-            Self::NoSuchBucket | Self::NoSuchKey => StatusCode::NOT_FOUND,
+            Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload => StatusCode::NOT_FOUND,
             Self::BucketAlreadyOwnedByYou | Self::BucketNotEmpty => StatusCode::CONFLICT,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
@@ -82,6 +88,14 @@ impl S3Error {
             code: S3ErrorCode::NoSuchKey,
             message: "The specified key does not exist.".into(),
             resource: Some(key.to_string()),
+        }
+    }
+
+    pub fn no_such_upload(upload_id: &str) -> Self {
+        Self {
+            code: S3ErrorCode::NoSuchUpload,
+            message: "The specified multipart upload does not exist.".into(),
+            resource: Some(upload_id.to_string()),
         }
     }
 
@@ -136,6 +150,23 @@ impl S3Error {
         }
     }
 
+    pub fn invalid_part(msg: &str) -> Self {
+        Self {
+            code: S3ErrorCode::InvalidPart,
+            message: msg.to_string(),
+            resource: None,
+        }
+    }
+
+    pub fn entity_too_small() -> Self {
+        Self {
+            code: S3ErrorCode::EntityTooSmall,
+            message:
+                "Your proposed upload is smaller than the minimum allowed object size.".into(),
+            resource: None,
+        }
+    }
+
     pub fn access_denied(msg: &str) -> Self {
         Self {
             code: S3ErrorCode::AccessDenied,
@@ -157,6 +188,14 @@ impl S3Error {
         Self {
             code: S3ErrorCode::InvalidAccessKeyId,
             message: "The AWS Access Key Id you provided does not exist in our records.".into(),
+            resource: None,
+        }
+    }
+
+    pub fn not_implemented(msg: &str) -> Self {
+        Self {
+            code: S3ErrorCode::NotImplemented,
+            message: msg.to_string(),
             resource: None,
         }
     }

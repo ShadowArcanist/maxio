@@ -11,6 +11,7 @@ use crate::error::S3Error;
 use crate::server::AppState;
 use crate::storage::ObjectMeta;
 use crate::xml::{response::to_xml, types::*};
+use super::multipart;
 
 pub async fn handle_bucket_get(
     State(state): State<AppState>,
@@ -23,6 +24,10 @@ pub async fn handle_bucket_get(
         Ok(true) => {}
         Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
         Err(e) => return Err(S3Error::internal(e)),
+    }
+
+    if params.contains_key("uploads") {
+        return multipart::list_multipart_uploads(State(state), Path(bucket)).await;
     }
 
     // Handle ?location query (GetBucketLocation)

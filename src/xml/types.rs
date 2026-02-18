@@ -107,3 +107,75 @@ pub struct LocationConstraint {
     #[serde(rename = "$text")]
     pub location: String,
 }
+
+#[derive(Serialize)]
+#[serde(rename = "InitiateMultipartUploadResult")]
+pub struct InitiateMultipartUploadResult {
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "UploadId")]
+    pub upload_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "CompleteMultipartUploadResult")]
+pub struct CompleteMultipartUploadResult {
+    #[serde(rename = "Location")]
+    pub location: String,
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
+}
+
+#[derive(Serialize)]
+pub struct PartEntry {
+    #[serde(rename = "PartNumber")]
+    pub part_number: u32,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
+    #[serde(rename = "Size")]
+    pub size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "ListPartsResult")]
+pub struct ListPartsResult {
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "UploadId")]
+    pub upload_id: String,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "Part", default)]
+    pub parts: Vec<PartEntry>,
+}
+
+#[derive(Serialize)]
+pub struct MultipartUploadEntry {
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "UploadId")]
+    pub upload_id: String,
+    #[serde(rename = "Initiated")]
+    pub initiated: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "ListMultipartUploadsResult")]
+pub struct ListMultipartUploadsResult {
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "Upload", default)]
+    pub uploads: Vec<MultipartUploadEntry>,
+}

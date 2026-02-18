@@ -1,10 +1,11 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Response,
 };
 use futures::TryStreamExt;
+use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio_util::io::ReaderStream;
 
@@ -12,12 +13,26 @@ use crate::error::S3Error;
 use crate::server::AppState;
 use crate::storage::StorageError;
 
+use super::multipart;
+
 pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, S3Error> {
+    if params.contains_key("uploadId") {
+        return multipart::upload_part(
+            State(state),
+            Path((bucket, key)),
+            Query(params),
+            headers,
+            body,
+        )
+        .await;
+    }
+
     match state.storage.head_bucket(&bucket).await {
         Ok(true) => {}
         Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
@@ -29,42 +44,7 @@ pub async fn put_object(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream");
 
-    let is_aws_chunked = headers
-        .get("x-amz-content-sha256")
-        .and_then(|v| v.to_str().ok())
-        == Some("STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
-
-    let stream = body.into_data_stream();
-    let raw_reader = tokio_util::io::StreamReader::new(
-        stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-    );
-
-    let reader: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = if is_aws_chunked {
-        let mut buf_reader = tokio::io::BufReader::new(raw_reader);
-        let mut decoded = Vec::new();
-        loop {
-            let mut line = String::new();
-            let n = buf_reader.read_line(&mut line).await.map_err(|e| S3Error::internal(e))?;
-            if n == 0 {
-                break;
-            }
-            let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
-            let size_str = line.split(';').next().unwrap_or("0");
-            let chunk_size =
-                usize::from_str_radix(size_str.trim(), 16).map_err(|_| S3Error::internal("invalid chunk size"))?;
-            if chunk_size == 0 {
-                break;
-            }
-            let mut chunk = vec![0u8; chunk_size];
-            buf_reader.read_exact(&mut chunk).await.map_err(|e| S3Error::internal(e))?;
-            decoded.extend_from_slice(&chunk);
-            let mut crlf = [0u8; 2];
-            let _ = buf_reader.read_exact(&mut crlf).await;
-        }
-        Box::pin(std::io::Cursor::new(decoded))
-    } else {
-        Box::pin(raw_reader)
-    };
+    let reader = body_to_reader(&headers, body).await?;
 
     // Verify Content-MD5 if provided
     let content_md5 = headers
@@ -112,7 +92,12 @@ fn to_http_date(iso: &str) -> String {
 pub async fn get_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, S3Error> {
+    if params.contains_key("uploadId") {
+        return multipart::list_parts(State(state), Path((bucket, key)), Query(params)).await;
+    }
+
     let (reader, meta) = state
         .storage
         .get_object(&bucket, &key)
@@ -163,7 +148,13 @@ pub async fn head_object(
 pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, S3Error> {
+    if params.contains_key("uploadId") {
+        return multipart::abort_multipart_upload(State(state), Path((bucket, key)), Query(params))
+            .await;
+    }
+
     state.storage.delete_object(&bucket, &key).await
         .map_err(|e| S3Error::internal(e))?;
 
@@ -171,6 +162,28 @@ pub async fn delete_object(
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
         .unwrap())
+}
+
+pub async fn post_object(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response<Body>, S3Error> {
+    if params.contains_key("uploads") {
+        return multipart::create_multipart_upload(State(state), Path((bucket, key)), headers).await;
+    }
+    if params.contains_key("uploadId") {
+        return multipart::complete_multipart_upload(
+            State(state),
+            Path((bucket, key)),
+            Query(params),
+            body,
+        )
+        .await;
+    }
+    Err(S3Error::not_implemented("Unsupported POST object operation"))
 }
 
 const DELETE_BODY_MAX: usize = 1024 * 1024;
@@ -251,4 +264,52 @@ pub async fn delete_objects(
         .header("Content-Type", "application/xml")
         .body(Body::from(response_xml))
         .unwrap())
+}
+
+pub(crate) async fn body_to_reader(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>, S3Error> {
+    let is_aws_chunked = headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        == Some("STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
+
+    let stream = body.into_data_stream();
+    let raw_reader = tokio_util::io::StreamReader::new(
+        stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+    );
+
+    if is_aws_chunked {
+        let mut buf_reader = tokio::io::BufReader::new(raw_reader);
+        let mut decoded = Vec::new();
+        loop {
+            let mut line = String::new();
+            let n = buf_reader
+                .read_line(&mut line)
+                .await
+                .map_err(S3Error::internal)?;
+            if n == 0 {
+                break;
+            }
+            let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let size_str = line.split(';').next().unwrap_or("0");
+            let chunk_size = usize::from_str_radix(size_str.trim(), 16)
+                .map_err(|_| S3Error::internal("invalid chunk size"))?;
+            if chunk_size == 0 {
+                break;
+            }
+            let mut chunk = vec![0u8; chunk_size];
+            buf_reader
+                .read_exact(&mut chunk)
+                .await
+                .map_err(S3Error::internal)?;
+            decoded.extend_from_slice(&chunk);
+            let mut crlf = [0u8; 2];
+            let _ = buf_reader.read_exact(&mut crlf).await;
+        }
+        Ok(Box::pin(std::io::Cursor::new(decoded)))
+    } else {
+        Ok(Box::pin(raw_reader))
+    }
 }

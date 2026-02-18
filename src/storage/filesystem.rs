@@ -1,8 +1,8 @@
-use super::{BucketMeta, ByteStream, ObjectMeta, PutResult, StorageError};
+use super::{BucketMeta, ByteStream, MultipartUploadMeta, ObjectMeta, PartMeta, PutResult, StorageError};
 use md5::{Digest, Md5};
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub struct FilesystemStorage {
     buckets_dir: PathBuf,
@@ -28,6 +28,16 @@ fn validate_key(key: &str) -> Result<(), StorageError> {
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_upload_id(upload_id: &str) -> Result<(), StorageError> {
+    if upload_id.is_empty() {
+        return Err(StorageError::UploadNotFound(upload_id.to_string()));
+    }
+    if upload_id.contains('/') || upload_id.contains('\\') || upload_id.contains("..") {
+        return Err(StorageError::UploadNotFound(upload_id.to_string()));
     }
     Ok(())
 }
@@ -101,6 +111,28 @@ impl FilesystemStorage {
         self.buckets_dir
             .join(bucket)
             .join(format!("{}.meta.json", key))
+    }
+
+    fn uploads_dir(&self, bucket: &str) -> PathBuf {
+        self.buckets_dir.join(bucket).join(".uploads")
+    }
+
+    fn upload_dir(&self, bucket: &str, upload_id: &str) -> PathBuf {
+        self.uploads_dir(bucket).join(upload_id)
+    }
+
+    fn upload_meta_path(&self, bucket: &str, upload_id: &str) -> PathBuf {
+        self.upload_dir(bucket, upload_id).join(".meta.json")
+    }
+
+    fn part_path(&self, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+        self.upload_dir(bucket, upload_id)
+            .join(part_number.to_string())
+    }
+
+    fn part_meta_path(&self, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+        self.upload_dir(bucket, upload_id)
+            .join(format!("{}.meta.json", part_number))
     }
 
     pub async fn put_object(
@@ -223,6 +255,217 @@ impl FilesystemStorage {
         Ok(results)
     }
 
+    pub async fn create_multipart_upload(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+    ) -> Result<MultipartUploadMeta, StorageError> {
+        validate_key(key)?;
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        let upload_dir = self.upload_dir(bucket, &upload_id);
+        fs::create_dir_all(&upload_dir).await?;
+
+        let meta = MultipartUploadMeta {
+            upload_id: upload_id.clone(),
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            content_type: content_type.to_string(),
+            initiated: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        };
+
+        let meta_json = serde_json::to_string_pretty(&meta)?;
+        fs::write(self.upload_meta_path(bucket, &upload_id), meta_json).await?;
+        Ok(meta)
+    }
+
+    pub async fn upload_part(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+        mut body: ByteStream,
+    ) -> Result<PartMeta, StorageError> {
+        validate_upload_id(upload_id)?;
+        if part_number == 0 || part_number > 10_000 {
+            return Err(StorageError::InvalidKey("part number must be 1..=10000".into()));
+        }
+        let upload_dir = self.upload_dir(bucket, upload_id);
+        if !fs::try_exists(&upload_dir).await? {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+
+        let part_path = self.part_path(bucket, upload_id, part_number);
+        let mut file = fs::File::create(&part_path).await?;
+        let mut hasher = Md5::new();
+        let mut size: u64 = 0;
+        let mut buf = vec![0u8; 64 * 1024];
+
+        loop {
+            let n = body.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).await?;
+            hasher.update(&buf[..n]);
+            size += n as u64;
+        }
+        file.flush().await?;
+
+        let etag = format!("\"{}\"", hex::encode(hasher.finalize()));
+        let meta = PartMeta {
+            part_number,
+            etag,
+            size,
+            last_modified: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+        };
+        fs::write(
+            self.part_meta_path(bucket, upload_id, part_number),
+            serde_json::to_string_pretty(&meta)?,
+        )
+        .await?;
+        Ok(meta)
+    }
+
+    pub async fn complete_multipart_upload(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<PutResult, StorageError> {
+        validate_upload_id(upload_id)?;
+        if parts.is_empty() {
+            return Err(StorageError::InvalidKey(
+                "at least one part is required to complete upload".into(),
+            ));
+        }
+
+        let upload_meta = self.read_upload_meta(bucket, upload_id).await?;
+        let mut selected = Vec::with_capacity(parts.len());
+        for (idx, (part_number, requested_etag)) in parts.iter().enumerate() {
+            let meta = self.read_part_meta(bucket, upload_id, *part_number).await?;
+            if meta.etag != *requested_etag {
+                return Err(StorageError::InvalidKey(format!(
+                    "etag mismatch for part {}",
+                    part_number
+                )));
+            }
+            if idx + 1 < parts.len() && meta.size < 5 * 1024 * 1024 {
+                return Err(StorageError::InvalidKey("part too small".into()));
+            }
+            selected.push(meta);
+        }
+
+        let obj_path = self.object_path(bucket, &upload_meta.key);
+        if let Some(parent) = obj_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let mut out = fs::File::create(&obj_path).await?;
+        let mut total_size = 0u64;
+        let mut etag_hasher = Md5::new();
+
+        for part in &selected {
+            let mut part_file = fs::File::open(self.part_path(bucket, upload_id, part.part_number)).await?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = part_file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n]).await?;
+                total_size += n as u64;
+            }
+
+            let raw_md5 = hex::decode(part.etag.trim_matches('"'))
+                .map_err(|_| StorageError::InvalidKey("invalid part etag".into()))?;
+            etag_hasher.update(raw_md5);
+        }
+        out.flush().await?;
+
+        let etag = format!("\"{}-{}\"", hex::encode(etag_hasher.finalize()), selected.len());
+        let object_meta = ObjectMeta {
+            key: upload_meta.key.clone(),
+            size: total_size,
+            etag: etag.clone(),
+            content_type: upload_meta.content_type,
+            last_modified: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        };
+        let meta_path = self.meta_path(bucket, &upload_meta.key);
+        if let Some(parent) = meta_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(meta_path, serde_json::to_string_pretty(&object_meta)?).await?;
+        let _ = fs::remove_dir_all(self.upload_dir(bucket, upload_id)).await;
+
+        Ok(PutResult {
+            size: total_size,
+            etag,
+        })
+    }
+
+    pub async fn abort_multipart_upload(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> Result<(), StorageError> {
+        validate_upload_id(upload_id)?;
+        let upload_dir = self.upload_dir(bucket, upload_id);
+        if !fs::try_exists(&upload_dir).await? {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        fs::remove_dir_all(upload_dir).await?;
+        Ok(())
+    }
+
+    pub async fn list_parts(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> Result<(MultipartUploadMeta, Vec<PartMeta>), StorageError> {
+        validate_upload_id(upload_id)?;
+        let meta = self.read_upload_meta(bucket, upload_id).await?;
+        let upload_dir = self.upload_dir(bucket, upload_id);
+        let mut entries = fs::read_dir(&upload_dir).await?;
+        let mut parts = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".meta.json") || name == ".meta.json" {
+                continue;
+            }
+            let data = fs::read_to_string(entry.path()).await?;
+            if let Ok(pm) = serde_json::from_str::<PartMeta>(&data) {
+                parts.push(pm);
+            }
+        }
+        parts.sort_by_key(|p| p.part_number);
+        Ok((meta, parts))
+    }
+
+    pub async fn list_multipart_uploads(
+        &self,
+        bucket: &str,
+    ) -> Result<Vec<MultipartUploadMeta>, StorageError> {
+        let uploads_dir = self.uploads_dir(bucket);
+        if !fs::try_exists(&uploads_dir).await? {
+            return Ok(Vec::new());
+        }
+        let mut entries = fs::read_dir(&uploads_dir).await?;
+        let mut uploads = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let upload_id = entry.file_name().to_string_lossy().to_string();
+            if let Ok(meta) = self.read_upload_meta(bucket, &upload_id).await {
+                uploads.push(meta);
+            }
+        }
+        uploads.sort_by(|a, b| a.initiated.cmp(&b.initiated));
+        Ok(uploads)
+    }
+
     // --- Internal helpers ---
 
     fn has_objects<'a>(
@@ -234,7 +477,7 @@ impl FilesystemStorage {
             let mut entries = fs::read_dir(dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname == ".bucket.json" || fname.ends_with(".meta.json") {
+                if fname == ".bucket.json" || fname == ".uploads" || fname.ends_with(".meta.json") {
                     continue;
                 }
                 if entry.file_type().await?.is_dir() {
@@ -284,7 +527,7 @@ impl FilesystemStorage {
                 let path = entry.path();
                 let fname = entry.file_name().to_string_lossy().to_string();
 
-                if fname.ends_with(".meta.json") || fname == ".bucket.json" {
+                if fname.ends_with(".meta.json") || fname == ".bucket.json" || fname == ".uploads" {
                     continue;
                 }
 
@@ -306,5 +549,38 @@ impl FilesystemStorage {
             }
             Ok(())
         })
+    }
+
+    async fn read_upload_meta(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> Result<MultipartUploadMeta, StorageError> {
+        let path = self.upload_meta_path(bucket, upload_id);
+        let data = fs::read_to_string(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::UploadNotFound(upload_id.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        Ok(serde_json::from_str(&data)?)
+    }
+
+    async fn read_part_meta(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> Result<PartMeta, StorageError> {
+        let path = self.part_meta_path(bucket, upload_id, part_number);
+        let data = fs::read_to_string(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::InvalidKey(format!("missing part {}", part_number))
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        Ok(serde_json::from_str(&data)?)
     }
 }

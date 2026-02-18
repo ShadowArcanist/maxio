@@ -27,6 +27,23 @@ pub struct ObjectMeta {
     pub last_modified: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultipartUploadMeta {
+    pub upload_id: String,
+    pub bucket: String,
+    pub key: String,
+    pub content_type: String,
+    pub initiated: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartMeta {
+    pub part_number: u32,
+    pub etag: String,
+    pub size: u64,
+    pub last_modified: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("IO error: {0}")]
@@ -39,4 +56,6 @@ pub enum StorageError {
     BucketNotEmpty,
     #[error("Invalid key: {0}")]
     InvalidKey(String),
+    #[error("Multipart upload not found: {0}")]
+    UploadNotFound(String),
 }

@@ -135,6 +135,15 @@ assert_eq "list nested prefix" "true" "$(echo "$OUTPUT" | grep -q "nested" && ec
 assert "download nested object" mc cp "$ALIAS/$BUCKET/folder/nested/file.txt" "$TMPDIR/nested.txt"
 assert_eq "nested content matches" "hello maxio" "$(cat "$TMPDIR/nested.txt")"
 
+# --- Multipart upload (large file) ---
+dd if=/dev/urandom of="$TMPDIR/big.bin" bs=1M count=15 status=none
+assert "upload large object (multipart)" mc cp "$TMPDIR/big.bin" "$ALIAS/$BUCKET/big.bin"
+assert "download large object" mc cp "$ALIAS/$BUCKET/big.bin" "$TMPDIR/big.download.bin"
+assert_eq "large object size matches" "$(wc -c < "$TMPDIR/big.bin" | tr -d ' ')" "$(wc -c < "$TMPDIR/big.download.bin" | tr -d ' ')"
+assert_eq "large object sha256 matches" "$(shasum -a 256 "$TMPDIR/big.bin" | awk '{print $1}')" "$(shasum -a 256 "$TMPDIR/big.download.bin" | awk '{print $1}')"
+OUTPUT=$(mc stat "$ALIAS/$BUCKET/big.bin" 2>&1)
+assert_eq "multipart etag suffix present" "true" "$(echo "$OUTPUT" | grep -Eq 'ETag.*-[0-9]+' && echo true || echo false)"
+
 # --- Overwrite object ---
 echo "updated content" > "$TMPDIR/updated.txt"
 assert "overwrite object" mc cp "$TMPDIR/updated.txt" "$ALIAS/$BUCKET/test.txt"
@@ -151,6 +160,7 @@ assert_fail "get deleted object" mc cat "$ALIAS/$BUCKET/test.txt"
 
 assert "delete nested object" mc rm "$ALIAS/$BUCKET/folder/nested/file.txt"
 assert_file_not_exists "deleted nested object gone from disk" "$DATA_DIR/buckets/$BUCKET/folder/nested/file.txt"
+assert "delete large object" mc rm "$ALIAS/$BUCKET/big.bin"
 
 # Delete bucket (should work now that it's empty)
 assert "delete empty bucket" mc rb "$ALIAS/$BUCKET"

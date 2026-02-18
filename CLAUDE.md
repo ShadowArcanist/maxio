@@ -23,6 +23,26 @@ cargo build --release
 
 Environment variables: `MAXIO_PORT`, `MAXIO_ADDRESS`, `MAXIO_DATA_DIR`, `MAXIO_ACCESS_KEY`, `MAXIO_SECRET_KEY`, `MAXIO_REGION`
 
+## Production Build
+
+The release binary is fully self-contained — the frontend UI is embedded at compile time via `rust-embed`. No external files needed.
+
+```bash
+# 1. Install frontend dependencies
+cd ui && bun install
+
+# 2. Build frontend (outputs to ui/dist/, required before cargo build)
+bun run build && cd ..
+
+# 3. Build optimized binary
+cargo build --release
+
+# Result: single binary at ./target/release/maxio
+# Copy it anywhere — no ui/dist/ or other files needed at runtime
+```
+
+The binary serves the web console at `/ui/` with proper MIME types, ETags, and cache headers (immutable for hashed assets, no-store for `index.html`).
+
 Defaults: port 9000, access/secret `minioadmin`/`minioadmin`, region `us-east-1`
 
 ## Development Workflow
