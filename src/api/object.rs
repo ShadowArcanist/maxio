@@ -18,8 +18,10 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, S3Error> {
-    if !state.storage.head_bucket(&bucket).await {
-        return Err(S3Error::no_such_bucket(&bucket));
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
+        Err(e) => return Err(S3Error::internal(e)),
     }
 
     let content_type = headers
@@ -38,7 +40,6 @@ pub async fn put_object(
     );
 
     let reader: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = if is_aws_chunked {
-        // Decode AWS chunked encoding: each chunk is "hex_size;chunk-signature=...\r\nDATA\r\n"
         let mut buf_reader = tokio::io::BufReader::new(raw_reader);
         let mut decoded = Vec::new();
         loop {
@@ -57,7 +58,6 @@ pub async fn put_object(
             let mut chunk = vec![0u8; chunk_size];
             buf_reader.read_exact(&mut chunk).await.map_err(|e| S3Error::internal(e))?;
             decoded.extend_from_slice(&chunk);
-            // Consume trailing \r\n
             let mut crlf = [0u8; 2];
             let _ = buf_reader.read_exact(&mut crlf).await;
         }
@@ -66,15 +66,37 @@ pub async fn put_object(
         Box::pin(raw_reader)
     };
 
+    // Verify Content-MD5 if provided
+    let content_md5 = headers
+        .get("content-md5")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let result = state
         .storage
         .put_object(&bucket, &key, content_type, reader)
         .await
-        .map_err(|e| S3Error::internal(e))?;
+        .map_err(|e| match e {
+            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+            _ => S3Error::internal(e),
+        })?;
+
+    if let Some(expected_md5) = content_md5 {
+        let hex_md5 = result.etag.trim_matches('"');
+        if let Ok(md5_bytes) = hex::decode(hex_md5) {
+            use base64::Engine;
+            let computed_md5 = base64::engine::general_purpose::STANDARD.encode(&md5_bytes);
+            if computed_md5 != expected_md5 {
+                let _ = state.storage.delete_object(&bucket, &key).await;
+                return Err(S3Error::bad_digest());
+            }
+        }
+    }
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("ETag", &result.etag)
+        .header("Content-Length", result.size.to_string())
         .body(Body::empty())
         .unwrap())
 }
@@ -97,6 +119,7 @@ pub async fn get_object(
         .await
         .map_err(|e| match e {
             StorageError::NotFound(_) => S3Error::no_such_key(&key),
+            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
             _ => S3Error::internal(e),
         })?;
 
@@ -123,6 +146,7 @@ pub async fn head_object(
         .await
         .map_err(|e| match e {
             StorageError::NotFound(_) => S3Error::no_such_key(&key),
+            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
             _ => S3Error::internal(e),
         })?;
 
@@ -140,7 +164,8 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response<Body>, S3Error> {
-    let _ = state.storage.delete_object(&bucket, &key).await;
+    state.storage.delete_object(&bucket, &key).await
+        .map_err(|e| S3Error::internal(e))?;
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -148,51 +173,77 @@ pub async fn delete_object(
         .unwrap())
 }
 
+const DELETE_BODY_MAX: usize = 1024 * 1024;
+
 /// Handle POST /{bucket}?delete — multi-object delete (DeleteObjects API).
 pub async fn delete_objects(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     body: Body,
 ) -> Result<Response<Body>, S3Error> {
-    // Parse the XML body to get the list of keys to delete
-    let bytes = axum::body::to_bytes(body, 1024 * 1024)
+    let bytes = axum::body::to_bytes(body, DELETE_BODY_MAX)
         .await
         .map_err(|e| S3Error::internal(e))?;
     let body_str = String::from_utf8_lossy(&bytes);
 
-    // Simple XML parsing: extract all <Key>...</Key> values
     let mut keys = Vec::new();
-    for segment in body_str.split("<Key>").skip(1) {
-        if let Some(key) = segment.split("</Key>").next() {
-            keys.push(key.to_string());
+    let mut reader = quick_xml::Reader::from_str(&body_str);
+    reader.config_mut().trim_text(true);
+    let mut in_key = false;
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(e)) if e.name().as_ref() == b"Key" => {
+                in_key = true;
+            }
+            Ok(quick_xml::events::Event::Text(e)) if in_key => {
+                keys.push(e.unescape().unwrap_or_default().into_owned());
+                in_key = false;
+            }
+            Ok(quick_xml::events::Event::End(e)) if e.name().as_ref() == b"Key" => {
+                in_key = false;
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => return Err(S3Error::malformed_xml()),
+            _ => {}
         }
     }
 
-    // Delete objects concurrently
     let mut set = tokio::task::JoinSet::new();
-    for key in keys.clone() {
+    for key in keys {
         let storage = state.storage.clone();
         let bucket = bucket.clone();
         set.spawn(async move {
-            let _ = storage.delete_object(&bucket, &key).await;
-            key
+            let result = storage.delete_object(&bucket, &key).await;
+            (key, result)
         });
     }
 
     let mut deleted_xml = String::new();
+    let mut error_xml = String::new();
     while let Some(result) = set.join_next().await {
-        if let Ok(key) = result {
-            deleted_xml.push_str(&format!(
-                "<Deleted><Key>{}</Key></Deleted>",
-                quick_xml::escape::escape(&key)
-            ));
+        if let Ok((key, delete_result)) = result {
+            match delete_result {
+                Ok(()) => {
+                    deleted_xml.push_str(&format!(
+                        "<Deleted><Key>{}</Key></Deleted>",
+                        quick_xml::escape::escape(&key)
+                    ));
+                }
+                Err(e) => {
+                    error_xml.push_str(&format!(
+                        "<Error><Key>{}</Key><Code>InternalError</Code><Message>{}</Message></Error>",
+                        quick_xml::escape::escape(&key),
+                        quick_xml::escape::escape(&e.to_string())
+                    ));
+                }
+            }
         }
     }
 
     let response_xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{}</DeleteResult>",
-        deleted_xml
+         <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{}{}</DeleteResult>",
+        deleted_xml, error_xml
     );
 
     Ok(Response::builder()

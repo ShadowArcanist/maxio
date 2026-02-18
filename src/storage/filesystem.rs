@@ -1,11 +1,35 @@
 use super::{BucketMeta, ByteStream, ObjectMeta, PutResult, StorageError};
 use md5::{Digest, Md5};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, BufReader};
 
 pub struct FilesystemStorage {
     buckets_dir: PathBuf,
+}
+
+/// Validate that an object key does not contain path traversal components.
+fn validate_key(key: &str) -> Result<(), StorageError> {
+    if key.is_empty() {
+        return Err(StorageError::InvalidKey("Key must not be empty".into()));
+    }
+    let path = Path::new(key);
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(StorageError::InvalidKey(
+                    "Key must not contain '..' path components".into(),
+                ));
+            }
+            Component::RootDir => {
+                return Err(StorageError::InvalidKey(
+                    "Key must not be an absolute path".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl FilesystemStorage {
@@ -31,26 +55,19 @@ impl FilesystemStorage {
         }
     }
 
-    pub async fn head_bucket(&self, name: &str) -> bool {
-        fs::try_exists(self.buckets_dir.join(name).join(".bucket.json"))
-            .await
-            .unwrap_or(false)
+    pub async fn head_bucket(&self, name: &str) -> Result<bool, StorageError> {
+        Ok(fs::try_exists(self.buckets_dir.join(name).join(".bucket.json")).await?)
     }
 
     pub async fn delete_bucket(&self, name: &str) -> Result<bool, StorageError> {
         let bucket_dir = self.buckets_dir.join(name);
-        if !fs::try_exists(&bucket_dir).await.unwrap_or(false) {
+        if !fs::try_exists(&bucket_dir).await? {
             return Ok(false);
         }
 
-        // Check if bucket has any objects (ignore .bucket.json and .meta.json files)
         let has_objects = self.has_objects(&bucket_dir).await?;
         if has_objects {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "BucketNotEmpty",
-            )
-            .into());
+            return Err(StorageError::BucketNotEmpty);
         }
 
         fs::remove_dir_all(&bucket_dir).await?;
@@ -93,6 +110,7 @@ impl FilesystemStorage {
         content_type: &str,
         mut body: ByteStream,
     ) -> Result<PutResult, StorageError> {
+        validate_key(key)?;
         let obj_path = self.object_path(bucket, key);
         if let Some(parent) = obj_path.parent() {
             fs::create_dir_all(parent).await?;
@@ -144,6 +162,7 @@ impl FilesystemStorage {
         bucket: &str,
         key: &str,
     ) -> Result<(ByteStream, ObjectMeta), StorageError> {
+        validate_key(key)?;
         let meta = self.read_object_meta(bucket, key).await?;
         let obj_path = self.object_path(bucket, key);
         let file = fs::File::open(&obj_path).await.map_err(|e| {
@@ -162,10 +181,12 @@ impl FilesystemStorage {
         bucket: &str,
         key: &str,
     ) -> Result<ObjectMeta, StorageError> {
+        validate_key(key)?;
         self.read_object_meta(bucket, key).await
     }
 
     pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
+        validate_key(key)?;
         let obj_path = self.object_path(bucket, key);
         let meta_path = self.meta_path(bucket, key);
 
@@ -181,7 +202,7 @@ impl FilesystemStorage {
             }
             match fs::remove_dir(&d).await {
                 Ok(()) => {}
-                Err(_) => break, // not empty or doesn't exist
+                Err(_) => break,
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
@@ -204,7 +225,6 @@ impl FilesystemStorage {
 
     // --- Internal helpers ---
 
-    /// Recursively check if a directory contains any non-metadata object files.
     fn has_objects<'a>(
         &'a self,
         dir: &'a Path,
@@ -222,7 +242,6 @@ impl FilesystemStorage {
                         return Ok(true);
                     }
                 } else {
-                    // Found an actual object file
                     return Ok(true);
                 }
             }
@@ -265,7 +284,6 @@ impl FilesystemStorage {
                 let path = entry.path();
                 let fname = entry.file_name().to_string_lossy().to_string();
 
-                // Skip metadata files and bucket meta
                 if fname.ends_with(".meta.json") || fname == ".bucket.json" {
                     continue;
                 }
@@ -273,7 +291,6 @@ impl FilesystemStorage {
                 if entry.file_type().await?.is_dir() {
                     self.walk_dir(base, &path, prefix, results).await?;
                 } else {
-                    // Derive the S3 key from the relative path
                     if let Ok(rel) = path.strip_prefix(base) {
                         let key = rel.to_string_lossy().to_string();
                         if key.starts_with(prefix) {

@@ -79,6 +79,29 @@ pub struct CommonPrefix {
 }
 
 #[derive(Serialize)]
+#[serde(rename = "ListBucketResult")]
+pub struct ListBucketResultV1 {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Prefix")]
+    pub prefix: String,
+    #[serde(rename = "Marker")]
+    pub marker: String,
+    #[serde(rename = "NextMarker", skip_serializing_if = "Option::is_none")]
+    pub next_marker: Option<String>,
+    #[serde(rename = "MaxKeys")]
+    pub max_keys: i32,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "Contents", skip_serializing_if = "Vec::is_empty")]
+    pub contents: Vec<ObjectEntry>,
+    #[serde(rename = "CommonPrefixes", skip_serializing_if = "Vec::is_empty")]
+    pub common_prefixes: Vec<CommonPrefix>,
+    #[serde(rename = "Delimiter", skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
+}
+
+#[derive(Serialize)]
 #[serde(rename = "LocationConstraint")]
 pub struct LocationConstraint {
     #[serde(rename = "$text")]

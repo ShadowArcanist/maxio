@@ -7,9 +7,11 @@
   import LogOut from "lucide-svelte/icons/log-out";
   import PanelLeftClose from "lucide-svelte/icons/panel-left-close";
   import PanelLeftOpen from "lucide-svelte/icons/panel-left-open";
-  import FlaskConical from "lucide-svelte/icons/flask-conical";
+  import HardDrive from "lucide-svelte/icons/hard-drive";
   import ArrowLeft from "lucide-svelte/icons/arrow-left";
   import ChevronRight from "lucide-svelte/icons/chevron-right";
+  import Sun from "lucide-svelte/icons/sun";
+  import Moon from "lucide-svelte/icons/moon";
 
   let authenticated = $state<boolean | null>(null);
   let collapsed = $state(false);
@@ -17,14 +19,46 @@
   let objectBrowserRef = $state<ObjectBrowser | null>(null);
   let currentPrefix = $state("");
   let currentBreadcrumbs = $state<{ label: string; prefix: string }[]>([]);
+  let isDark = $state(document.documentElement.classList.contains("dark"));
 
-  onMount(async () => {
-    try {
-      const res = await fetch("/api/auth/check");
-      authenticated = res.ok;
-    } catch {
-      authenticated = false;
+  function applyHash() {
+    const hash = window.location.hash.slice(1) || "/";
+    if (hash === "/") {
+      selectedBucket = null;
+      currentPrefix = "";
+      currentBreadcrumbs = [];
+    } else {
+      const parts = hash.slice(1).split("/"); // remove leading /
+      const bucket = decodeURIComponent(parts[0]);
+      const prefix = parts.slice(1).join("/");
+      selectedBucket = bucket;
+      if (prefix && objectBrowserRef) {
+        objectBrowserRef.navigateTo(prefix);
+      }
     }
+  }
+
+  function updateHash() {
+    if (!selectedBucket) {
+      window.location.hash = "/";
+    } else if (currentPrefix) {
+      window.location.hash = `/${encodeURIComponent(selectedBucket)}/${currentPrefix}`;
+    } else {
+      window.location.hash = `/${encodeURIComponent(selectedBucket)}`;
+    }
+  }
+
+  onMount(() => {
+    fetch("/api/auth/check")
+      .then((res) => { authenticated = res.ok; })
+      .catch(() => { authenticated = false; });
+
+    window.addEventListener("hashchange", applyHash);
+    if (window.location.hash && window.location.hash !== "#/") {
+      applyHash();
+    }
+
+    return () => window.removeEventListener("hashchange", applyHash);
   });
 
   function handleLogin() {
@@ -34,6 +68,37 @@
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST" });
     authenticated = false;
+  }
+
+  function toggleTheme() {
+    isDark = !isDark;
+    if (isDark) {
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
+    }
+  }
+
+  function selectBucket(name: string) {
+    selectedBucket = name;
+    currentPrefix = "";
+    currentBreadcrumbs = [];
+    updateHash();
+  }
+
+  function goHome() {
+    selectedBucket = null;
+    currentPrefix = "";
+    currentBreadcrumbs = [];
+    updateHash();
+  }
+
+  function handlePrefixChange(p: string, crumbs: { label: string; prefix: string }[]) {
+    currentPrefix = p;
+    currentBreadcrumbs = crumbs;
+    updateHash();
   }
 </script>
 
@@ -49,7 +114,7 @@
       class:w-14={collapsed}
       style="border-color: var(--cool-sidebar-border);"
     >
-      <!-- Collapse/expand toggle — positioned outside the nav edge -->
+      <!-- Collapse/expand toggle -->
       <button
         onclick={() => (collapsed = !collapsed)}
         class="absolute top-4 -right-3 z-10 flex size-6 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors hover:text-foreground"
@@ -71,7 +136,7 @@
         style="border-bottom: 1px solid var(--cool-sidebar-border);"
       >
         {#if collapsed}
-          <FlaskConical class="size-5 text-primary" />
+          <HardDrive class="size-5 text-primary" />
         {:else}
           <span
             class="text-lg font-bold tracking-tight text-foreground whitespace-nowrap"
@@ -83,7 +148,7 @@
       <!-- Nav items -->
       <div class="flex flex-1 flex-col gap-0.5 p-2">
         <button
-          onclick={() => { selectedBucket = null; currentPrefix = ""; currentBreadcrumbs = []; }}
+          onclick={goHome}
           class="flex h-9 w-full items-center rounded-sm text-left text-sm font-medium transition-colors overflow-hidden"
           class:gap-3={!collapsed}
           class:px-3={!collapsed}
@@ -96,23 +161,33 @@
         </button>
       </div>
 
-      <!-- Bottom: logout -->
+      <!-- Bottom: theme toggle + logout -->
       <div
-        class="p-2"
+        class="flex flex-col gap-0.5 p-2"
         style="border-top: 1px solid var(--cool-sidebar-border);"
       >
         <button
+          onclick={toggleTheme}
+          class="flex h-9 w-full items-center rounded-sm text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted overflow-hidden"
+          class:gap-3={!collapsed}
+          class:px-3={!collapsed}
+          class:justify-center={collapsed}
+          title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {#if isDark}
+            <Sun class="size-4 shrink-0" />
+          {:else}
+            <Moon class="size-4 shrink-0" />
+          {/if}
+          {#if !collapsed}<span class="whitespace-nowrap">{isDark ? "Light mode" : "Dark mode"}</span>{/if}
+        </button>
+        <button
           onclick={handleLogout}
-          class="flex h-9 w-full items-center rounded-sm text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground overflow-hidden"
+          class="flex h-9 w-full items-center rounded-sm text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted overflow-hidden"
           class:gap-3={!collapsed}
           class:px-3={!collapsed}
           class:justify-center={collapsed}
           title="Sign out"
-          style="background: transparent;"
-          onmouseenter={(e) =>
-            (e.currentTarget.style.background = "var(--cool-sidebar-hover)")}
-          onmouseleave={(e) =>
-            (e.currentTarget.style.background = "transparent")}
         >
           <LogOut class="size-4 shrink-0" />
           {#if !collapsed}<span class="whitespace-nowrap">Sign out</span>{/if}
@@ -121,7 +196,7 @@
     </nav>
 
     <main class="flex flex-1 flex-col overflow-hidden">
-      <!-- Header bar — aligned with sidebar h-14 -->
+      <!-- Header bar -->
       <div
         class="flex h-14 shrink-0 items-center gap-2 px-6"
         style="border-bottom: 1px solid var(--cool-sidebar-border);"
@@ -136,7 +211,7 @@
           <nav class="flex items-center gap-1 text-sm overflow-x-auto">
             <button
               class="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-              onclick={() => { selectedBucket = null; currentPrefix = ""; currentBreadcrumbs = []; }}>Buckets</button
+              onclick={goHome}>Buckets</button
             >
             <ChevronRight class="size-3 shrink-0 text-muted-foreground" />
             {#if currentBreadcrumbs.length > 1}
@@ -165,11 +240,11 @@
           <ObjectBrowser
             bind:this={objectBrowserRef}
             bucket={selectedBucket}
-            onBack={() => (selectedBucket = null)}
-            onPrefixChange={(p, crumbs) => { currentPrefix = p; currentBreadcrumbs = crumbs; }}
+            onBack={goHome}
+            onPrefixChange={handlePrefixChange}
           />
         {:else}
-          <BucketList onSelect={(name) => (selectedBucket = name)} />
+          <BucketList onSelect={selectBucket} />
         {/if}
       </div>
     </main>

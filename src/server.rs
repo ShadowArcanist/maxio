@@ -27,5 +27,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ui/", get(ui_handler))
         .route("/ui/{*path}", get(ui_handler))
         .merge(s3_routes)
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state)
+}
+
+async fn request_id_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut response = next.run(request).await;
+    if let Ok(value) = request_id.parse() {
+        response.headers_mut().insert("x-amz-request-id", value);
+    }
+    response
 }

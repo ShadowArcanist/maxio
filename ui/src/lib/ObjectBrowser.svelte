@@ -2,12 +2,11 @@
   import { onMount } from 'svelte'
   import * as Table from '$lib/components/ui/table'
   import { Button } from '$lib/components/ui/button'
-  import RefreshCw from 'lucide-svelte/icons/refresh-cw'
   import Folder from 'lucide-svelte/icons/folder'
   import FileIcon from 'lucide-svelte/icons/file'
-  import ChevronRight from 'lucide-svelte/icons/chevron-right'
-  import ArrowLeft from 'lucide-svelte/icons/arrow-left'
   import Download from 'lucide-svelte/icons/download'
+  import Upload from 'lucide-svelte/icons/upload'
+  import Trash2 from 'lucide-svelte/icons/trash-2'
 
   interface Props {
     bucket: string
@@ -27,9 +26,13 @@
   let files = $state<S3File[]>([])
   let prefixes = $state<string[]>([])
   let loading = $state(true)
+  let error = $state<string | null>(null)
+  let uploading = $state(false)
+  let fileInput: HTMLInputElement | undefined = $state()
 
   async function fetchObjects() {
     loading = true
+    error = null
     try {
       const params = new URLSearchParams({ prefix, delimiter: '/' })
       const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/objects?${params}`)
@@ -37,9 +40,11 @@
         const data = await res.json()
         files = data.files
         prefixes = data.prefixes
+      } else {
+        error = `Failed to load objects (${res.status})`
       }
     } catch {
-      // ignore
+      error = 'Failed to connect to server'
     } finally {
       loading = false
     }
@@ -67,7 +72,6 @@
     notifyPrefix()
   }
 
-  // Extract display name from full key/prefix
   function displayName(fullPath: string): string {
     const trimmed = fullPath.endsWith('/') ? fullPath.slice(0, -1) : fullPath
     const lastSlash = trimmed.lastIndexOf('/')
@@ -89,7 +93,6 @@
     }
   }
 
-  // Breadcrumb segments
   let breadcrumbs = $derived.by(() => {
     const parts = prefix.split('/').filter(Boolean)
     const crumbs: { label: string; prefix: string }[] = [
@@ -107,13 +110,77 @@
     return `/api/buckets/${encodeURIComponent(bucket)}/download/${key}`
   }
 
+  async function handleUpload() {
+    const inputFiles = fileInput?.files
+    if (!inputFiles || inputFiles.length === 0) return
+    uploading = true
+    error = null
+    try {
+      for (const file of inputFiles) {
+        const key = `${prefix}${file.name}`
+        const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/upload/${key}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        })
+        if (!res.ok) {
+          const data = await res.json()
+          error = data.error || `Failed to upload ${file.name}`
+          break
+        }
+      }
+      if (fileInput) fileInput.value = ''
+      await fetchObjects()
+    } catch {
+      error = 'Failed to upload file'
+    } finally {
+      uploading = false
+    }
+  }
+
+  async function deleteObject(key: string, e: Event) {
+    e.stopPropagation()
+    if (!confirm(`Delete "${displayName(key)}"?`)) return
+    error = null
+    try {
+      const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/objects/${key}`, { method: 'DELETE' })
+      if (res.ok) {
+        await fetchObjects()
+      } else {
+        const data = await res.json()
+        error = data.error || `Failed to delete object`
+      }
+    } catch {
+      error = 'Failed to connect to server'
+    }
+  }
+
   onMount(fetchObjects)
 </script>
 
 <div class="flex flex-col gap-4">
+  {#if error}
+    <div class="rounded-sm border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+      {error}
+    </div>
+  {/if}
+
+  <div class="flex items-center gap-2">
+    <input
+      bind:this={fileInput}
+      type="file"
+      multiple
+      class="hidden"
+      onchange={handleUpload}
+    />
+    <Button variant="brand" class="h-8" onclick={() => fileInput?.click()} disabled={uploading}>
+      <Upload class="size-4 mr-1" /> {uploading ? 'Uploading...' : 'Upload'}
+    </Button>
+  </div>
+
   {#if loading && files.length === 0 && prefixes.length === 0}
     <p class="text-sm text-muted-foreground">Loading...</p>
-  {:else if files.length === 0 && prefixes.length === 0}
+  {:else if files.length === 0 && prefixes.length === 0 && !error}
     <div class="flex flex-col items-center gap-2 py-12 text-muted-foreground">
       <Folder class="size-10 opacity-30" />
       <p class="text-sm">Empty</p>
@@ -125,7 +192,7 @@
           <Table.Head>Name</Table.Head>
           <Table.Head class="w-28 text-right">Size</Table.Head>
           <Table.Head class="w-48">Modified</Table.Head>
-          <Table.Head class="w-10"></Table.Head>
+          <Table.Head class="w-20"></Table.Head>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -137,13 +204,13 @@
                 <span class="font-medium">{displayName(p)}/</span>
               </span>
             </Table.Cell>
-            <Table.Cell class="text-right text-muted-foreground">—</Table.Cell>
-            <Table.Cell class="text-muted-foreground">—</Table.Cell>
+            <Table.Cell class="text-right text-muted-foreground">&mdash;</Table.Cell>
+            <Table.Cell class="text-muted-foreground">&mdash;</Table.Cell>
             <Table.Cell></Table.Cell>
           </Table.Row>
         {/each}
         {#each files as file}
-          <Table.Row class="cursor-pointer" onclick={() => window.location.href = downloadUrl(file.key)}>
+          <Table.Row>
             <Table.Cell>
               <span class="flex items-center gap-2">
                 <FileIcon class="size-4 shrink-0 text-muted-foreground" />
@@ -152,10 +219,19 @@
             </Table.Cell>
             <Table.Cell class="text-right text-muted-foreground">{formatSize(file.size)}</Table.Cell>
             <Table.Cell class="text-muted-foreground">{formatDate(file.lastModified)}</Table.Cell>
-            <Table.Cell class="w-10">
-              <a href={downloadUrl(file.key)} class="text-muted-foreground hover:text-foreground" onclick={(e) => e.stopPropagation()}>
-                <Download class="size-4" />
-              </a>
+            <Table.Cell class="w-20">
+              <span class="flex items-center gap-1">
+                <a href={downloadUrl(file.key)} class="text-muted-foreground hover:text-foreground" onclick={(e) => e.stopPropagation()} title="Download">
+                  <Download class="size-4" />
+                </a>
+                <button
+                  class="text-muted-foreground hover:text-destructive transition-colors"
+                  onclick={(e) => deleteObject(file.key, e)}
+                  title="Delete"
+                >
+                  <Trash2 class="size-4" />
+                </button>
+              </span>
             </Table.Cell>
           </Table.Row>
         {/each}

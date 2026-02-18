@@ -33,9 +33,9 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", config.address, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Maxio listening on {}", addr);
+    tracing::info!("MaxIO listening on {}", addr);
     tracing::info!("Access Key: {}", config.access_key);
-    tracing::info!("Secret Key: {}", config.secret_key);
+    tracing::info!("Secret Key: [REDACTED]");
     tracing::info!("Data dir:   {}", config.data_dir);
     tracing::info!("Region:     {}", config.region);
 

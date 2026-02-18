@@ -6,7 +6,6 @@ use tokio::io::AsyncRead;
 
 pub type ByteStream = Pin<Box<dyn AsyncRead + Send>>;
 
-#[allow(dead_code)]
 pub struct PutResult {
     pub size: u64,
     pub etag: String,
@@ -36,4 +35,8 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("Bucket not empty")]
+    BucketNotEmpty,
+    #[error("Invalid key: {0}")]
+    InvalidKey(String),
 }

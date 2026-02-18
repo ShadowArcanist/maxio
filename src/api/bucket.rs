@@ -7,7 +7,7 @@ use axum::{
 
 use crate::error::S3Error;
 use crate::server::AppState;
-use crate::storage::BucketMeta;
+use crate::storage::{BucketMeta, StorageError};
 use crate::xml::{response::to_xml, types::*};
 
 pub async fn list_buckets(State(state): State<AppState>) -> Result<Response<Body>, S3Error> {
@@ -79,8 +79,10 @@ pub async fn head_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Result<Response<Body>, S3Error> {
-    if !state.storage.head_bucket(&bucket).await {
-        return Err(S3Error::no_such_bucket(&bucket));
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
+        Err(e) => return Err(S3Error::internal(e)),
     }
 
     Ok(Response::builder()
@@ -100,14 +102,8 @@ pub async fn delete_bucket(
             .body(Body::empty())
             .unwrap()),
         Ok(false) => Err(S3Error::no_such_bucket(&bucket)),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("BucketNotEmpty") {
-                Err(S3Error::bucket_not_empty(&bucket))
-            } else {
-                Err(S3Error::internal(e))
-            }
-        }
+        Err(StorageError::BucketNotEmpty) => Err(S3Error::bucket_not_empty(&bucket)),
+        Err(e) => Err(S3Error::internal(e)),
     }
 }
 

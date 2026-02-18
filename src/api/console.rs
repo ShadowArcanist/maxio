@@ -5,9 +5,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
+use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -61,6 +62,21 @@ fn extract_cookie(headers: &HeaderMap) -> Option<String> {
         })
 }
 
+fn make_cookie(value: &str, max_age: i64, request_headers: &HeaderMap) -> String {
+    let is_secure = request_headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "https")
+        .unwrap_or(false);
+
+    let secure_flag = if is_secure { "; Secure" } else { "" };
+
+    format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        COOKIE_NAME, value, max_age, secure_flag
+    )
+}
+
 async fn console_auth_middleware(
     State(state): State<AppState>,
     request: Request,
@@ -85,6 +101,7 @@ pub struct LoginRequest {
 
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
     if body.access_key != state.config.access_key || body.secret_key != state.config.secret_key {
@@ -93,15 +110,12 @@ pub async fn login(
 
     let now = chrono::Utc::now().timestamp();
     let token = generate_token(&state.config.access_key, &state.config.secret_key, now);
-    let cookie = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
-        COOKIE_NAME, token, TOKEN_MAX_AGE_SECS
-    );
+    let cookie = make_cookie(&token, TOKEN_MAX_AGE_SECS, &headers);
 
-    let mut headers = HeaderMap::new();
-    headers.insert("Set-Cookie", cookie.parse().unwrap());
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
 
-    (StatusCode::OK, headers, Json(serde_json::json!({"ok": true})))
+    (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true})))
 }
 
 pub async fn check(
@@ -119,11 +133,11 @@ pub async fn check(
     }
 }
 
-pub async fn logout() -> impl IntoResponse {
-    let cookie = format!("{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0", COOKIE_NAME);
-    let mut headers = HeaderMap::new();
-    headers.insert("Set-Cookie", cookie.parse().unwrap());
-    (StatusCode::OK, headers, Json(serde_json::json!({"ok": true})))
+pub async fn logout(headers: HeaderMap) -> impl IntoResponse {
+    let cookie = make_cookie("", 0, &headers);
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
+    (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true})))
 }
 
 pub async fn list_buckets(
@@ -143,6 +157,43 @@ pub async fn list_buckets(
 }
 
 #[derive(serde::Deserialize)]
+pub struct CreateBucketRequest {
+    name: String,
+}
+
+pub async fn create_bucket(
+    State(state): State<AppState>,
+    Json(body): Json<CreateBucketRequest>,
+) -> impl IntoResponse {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let meta = crate::storage::BucketMeta {
+        name: body.name.clone(),
+        created_at: now,
+        region: state.config.region.clone(),
+    };
+
+    match state.storage.create_bucket(&meta).await {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(false) => (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Bucket already exists"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn delete_bucket_api(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.delete_bucket(&bucket).await {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Bucket not found"}))).into_response(),
+        Err(crate::storage::StorageError::BucketNotEmpty) => {
+            (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Bucket is not empty"}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
 pub struct ListObjectsParams {
     prefix: Option<String>,
     delimiter: Option<String>,
@@ -153,8 +204,10 @@ pub async fn list_objects(
     Path(bucket): Path<String>,
     Query(params): Query<ListObjectsParams>,
 ) -> impl IntoResponse {
-    if !state.storage.head_bucket(&bucket).await {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Bucket not found"}))).into_response();
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Bucket not found"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 
     let prefix = params.prefix.unwrap_or_default();
@@ -193,6 +246,48 @@ pub async fn list_objects(
     }))).into_response()
 }
 
+pub async fn upload_object(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> impl IntoResponse {
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Bucket not found"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+
+    let stream = body.into_data_stream();
+    let reader = tokio_util::io::StreamReader::new(
+        stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+    );
+
+    match state.storage.put_object(&bucket, &key, content_type, Box::pin(reader)).await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "etag": result.etag,
+            "size": result.size,
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn delete_object_api(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.storage.delete_object(&bucket, &key).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 pub async fn download_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -226,7 +321,11 @@ pub fn console_router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
         .route("/buckets", get(list_buckets))
+        .route("/buckets", post(create_bucket))
+        .route("/buckets/{bucket}", delete(delete_bucket_api))
         .route("/buckets/{bucket}/objects", get(list_objects))
+        .route("/buckets/{bucket}/objects/{*key}", delete(delete_object_api))
+        .route("/buckets/{bucket}/upload/{*key}", put(upload_object))
         .route("/buckets/{bucket}/download/{*key}", get(download_object))
         .layer(axum::middleware::from_fn_with_state(
             state,

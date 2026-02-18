@@ -2,6 +2,12 @@
 name = "maxio"
 version = "0.1.0"
 edition = "2024"
+description = "S3-compatible object storage server — single-binary replacement for MinIO"
+license = "Apache-2.0"
+repository = "https://github.com/coollabsio/maxio"
+authors = ["MaxIO Contributors"]
+keywords = ["s3", "object-storage", "minio", "storage", "server"]
+categories = ["web-programming::http-server", "filesystem"]
 
 [dependencies]
 # HTTP server
@@ -39,7 +45,6 @@ thiserror = "2"
 anyhow = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
-async-trait = "0.1"
 base64 = "0.22"
 
 # Embedded UI assets

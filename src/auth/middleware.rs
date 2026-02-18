@@ -51,6 +51,15 @@ pub async fn auth_middleware(
         return Err(S3Error::invalid_access_key());
     }
 
+    if parsed.region != state.config.region {
+        tracing::debug!(
+            "Region mismatch: got '{}', expected '{}'",
+            parsed.region,
+            state.config.region
+        );
+        return Err(S3Error::access_denied("Invalid region in credential scope"));
+    }
+
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or("").to_string();
 

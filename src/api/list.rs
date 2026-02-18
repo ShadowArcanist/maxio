@@ -19,8 +19,10 @@ pub async fn handle_bucket_get(
 ) -> Result<Response<Body>, S3Error> {
     tracing::debug!("GET /{} params={:?}", bucket, params);
 
-    if !state.storage.head_bucket(&bucket).await {
-        return Err(S3Error::no_such_bucket(&bucket));
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
+        Err(e) => return Err(S3Error::internal(e)),
     }
 
     // Handle ?location query (GetBucketLocation)
@@ -38,7 +40,11 @@ pub async fn handle_bucket_get(
             .unwrap());
     }
 
-    list_objects_v2(state, bucket, params).await
+    if params.get("list-type").map(|v| v.as_str()) == Some("2") {
+        list_objects_v2(state, bucket, params).await
+    } else {
+        list_objects_v1(state, bucket, params).await
+    }
 }
 
 async fn list_objects_v2(
@@ -87,11 +93,113 @@ async fn list_objects_v2(
     let is_truncated = filtered.len() > max_keys;
     let page: Vec<&ObjectMeta> = filtered.into_iter().take(max_keys).collect();
 
-    let (contents, common_prefixes) = if let Some(ref delim) = delimiter {
+    let (contents, common_prefixes) = split_by_delimiter(&page, &prefix, &delimiter);
+
+    let next_token = if is_truncated {
+        page.last().map(|o| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&o.key)
+        })
+    } else {
+        None
+    };
+
+    let result = ListBucketResult {
+        name: bucket,
+        prefix,
+        key_count: contents.len() as i32 + common_prefixes.len() as i32,
+        max_keys: max_keys as i32,
+        is_truncated,
+        contents,
+        common_prefixes,
+        continuation_token,
+        next_continuation_token: next_token,
+        delimiter,
+        start_after,
+    };
+
+    let xml = to_xml(&result).map_err(|e| S3Error::internal(e))?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/xml")
+        .body(Body::from(xml))
+        .unwrap())
+}
+
+async fn list_objects_v1(
+    state: AppState,
+    bucket: String,
+    params: HashMap<String, String>,
+) -> Result<Response<Body>, S3Error> {
+    let prefix = params.get("prefix").cloned().unwrap_or_default();
+    let delimiter = params.get("delimiter").cloned();
+    let max_keys: usize = params
+        .get("max-keys")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+        .min(1000);
+    let marker = params.get("marker").cloned();
+
+    let all_objects = state
+        .storage
+        .list_objects(&bucket, &prefix)
+        .await
+        .map_err(|e| S3Error::internal(e))?;
+
+    let filtered: Vec<&ObjectMeta> = all_objects
+        .iter()
+        .filter(|o| {
+            if let Some(ref m) = marker {
+                o.key.as_str() > m.as_str()
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let is_truncated = filtered.len() > max_keys;
+    let page: Vec<&ObjectMeta> = filtered.into_iter().take(max_keys).collect();
+
+    let (contents, common_prefixes) = split_by_delimiter(&page, &prefix, &delimiter);
+
+    let next_marker = if is_truncated {
+        page.last().map(|o| o.key.clone())
+    } else {
+        None
+    };
+
+    let result = ListBucketResultV1 {
+        name: bucket,
+        prefix,
+        marker: marker.unwrap_or_default(),
+        next_marker,
+        max_keys: max_keys as i32,
+        is_truncated,
+        contents,
+        common_prefixes,
+        delimiter,
+    };
+
+    let xml = to_xml(&result).map_err(|e| S3Error::internal(e))?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/xml")
+        .body(Body::from(xml))
+        .unwrap())
+}
+
+fn split_by_delimiter(
+    page: &[&ObjectMeta],
+    prefix: &str,
+    delimiter: &Option<String>,
+) -> (Vec<ObjectEntry>, Vec<CommonPrefix>) {
+    if let Some(delim) = delimiter {
         let mut contents = Vec::new();
         let mut prefix_set = BTreeSet::new();
 
-        for obj in &page {
+        for obj in page {
             let suffix = &obj.key[prefix.len()..];
             if let Some(pos) = suffix.find(delim.as_str()) {
                 let common = format!("{}{}", prefix, &suffix[..pos + delim.len()]);
@@ -126,36 +234,5 @@ async fn list_objects_v2(
                 .collect(),
             vec![],
         )
-    };
-
-    let next_token = if is_truncated {
-        page.last().map(|o| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(&o.key)
-        })
-    } else {
-        None
-    };
-
-    let result = ListBucketResult {
-        name: bucket,
-        prefix,
-        key_count: contents.len() as i32 + common_prefixes.len() as i32,
-        max_keys: max_keys as i32,
-        is_truncated,
-        contents,
-        common_prefixes,
-        continuation_token,
-        next_continuation_token: next_token,
-        delimiter,
-        start_after,
-    };
-
-    let xml = to_xml(&result).map_err(|e| S3Error::internal(e))?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/xml")
-        .body(Body::from(xml))
-        .unwrap())
+    }
 }

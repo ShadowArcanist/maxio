@@ -134,13 +134,27 @@ fn canonical_query_string(qs: &str) -> String {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next().unwrap_or("").to_string();
             let val = parts.next().unwrap_or("").to_string();
-            (key, val)
+            // Decode first (values arrive already percent-encoded from HTTP),
+            // then re-encode to normalize per AWS SigV4 spec.
+            let key_decoded = percent_encoding::percent_decode_str(&key)
+                .decode_utf8_lossy()
+                .into_owned();
+            let val_decoded = percent_encoding::percent_decode_str(&val)
+                .decode_utf8_lossy()
+                .into_owned();
+            (key_decoded, val_decoded)
         })
         .collect();
     pairs.sort();
     pairs
         .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                percent_encoding::utf8_percent_encode(k, S3_URI_ENCODE),
+                percent_encoding::utf8_percent_encode(v, S3_URI_ENCODE)
+            )
+        })
         .collect::<Vec<_>>()
         .join("&")
 }

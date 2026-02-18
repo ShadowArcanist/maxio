@@ -12,6 +12,7 @@ pub struct S3Error {
 #[allow(dead_code)]
 pub enum S3ErrorCode {
     AccessDenied,
+    BadDigest,
     BucketAlreadyOwnedByYou,
     BucketNotEmpty,
     InternalError,
@@ -29,6 +30,7 @@ impl S3ErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AccessDenied => "AccessDenied",
+            Self::BadDigest => "BadDigest",
             Self::BucketAlreadyOwnedByYou => "BucketAlreadyOwnedByYou",
             Self::BucketNotEmpty => "BucketNotEmpty",
             Self::InternalError => "InternalError",
@@ -110,6 +112,30 @@ impl S3Error {
         }
     }
 
+    pub fn invalid_argument(msg: &str) -> Self {
+        Self {
+            code: S3ErrorCode::InvalidArgument,
+            message: msg.to_string(),
+            resource: None,
+        }
+    }
+
+    pub fn bad_digest() -> Self {
+        Self {
+            code: S3ErrorCode::BadDigest,
+            message: "The Content-MD5 you specified did not match what we received.".into(),
+            resource: None,
+        }
+    }
+
+    pub fn malformed_xml() -> Self {
+        Self {
+            code: S3ErrorCode::MalformedXML,
+            message: "The XML you provided was not well-formed.".into(),
+            resource: None,
+        }
+    }
+
     pub fn access_denied(msg: &str) -> Self {
         Self {
             code: S3ErrorCode::AccessDenied,
@@ -154,9 +180,13 @@ impl IntoResponse for S3Error {
             request_id,
         );
 
+        let status = self.code.status_code();
         (
-            self.code.status_code(),
-            [("content-type", "application/xml")],
+            status,
+            [
+                ("content-type", "application/xml"),
+                ("x-amz-request-id", &request_id.to_string()),
+            ],
             xml,
         )
             .into_response()
