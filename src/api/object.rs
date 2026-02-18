@@ -12,6 +12,7 @@ use tokio_util::io::ReaderStream;
 use crate::error::S3Error;
 use crate::server::AppState;
 use crate::storage::StorageError;
+use crate::xml::{response::to_xml, types::CopyObjectResult};
 
 use super::multipart;
 
@@ -22,6 +23,10 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, S3Error> {
+    if headers.contains_key("x-amz-copy-source") {
+        return copy_object(State(state), Path((bucket, key)), headers).await;
+    }
+
     if params.contains_key("uploadId") {
         return multipart::upload_part(
             State(state),
@@ -78,6 +83,88 @@ pub async fn put_object(
         .header("ETag", &result.etag)
         .header("Content-Length", result.size.to_string())
         .body(Body::empty())
+        .unwrap())
+}
+
+async fn copy_object(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, S3Error> {
+    let copy_source = headers
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| S3Error::invalid_argument("missing x-amz-copy-source header"))?;
+
+    let decoded = percent_encoding::percent_decode_str(copy_source)
+        .decode_utf8()
+        .map_err(|_| S3Error::invalid_argument("invalid x-amz-copy-source encoding"))?;
+    let trimmed = decoded.trim_start_matches('/');
+    let (src_bucket, src_key) = trimmed
+        .split_once('/')
+        .ok_or_else(|| S3Error::invalid_argument("invalid x-amz-copy-source format"))?;
+
+    // Validate destination bucket
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
+        Err(e) => return Err(S3Error::internal(e)),
+    }
+
+    // Get source object
+    let (reader, src_meta) = state
+        .storage
+        .get_object(src_bucket, src_key)
+        .await
+        .map_err(|e| match e {
+            StorageError::NotFound(_) => S3Error::no_such_key(src_key),
+            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+            _ => S3Error::internal(e),
+        })?;
+
+    // Determine content-type based on metadata directive
+    let directive = headers
+        .get("x-amz-metadata-directive")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("COPY");
+
+    let content_type = match directive {
+        "COPY" => src_meta.content_type.clone(),
+        "REPLACE" => headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        _ => return Err(S3Error::invalid_argument("invalid x-amz-metadata-directive")),
+    };
+
+    // Write destination
+    let result = state
+        .storage
+        .put_object(&bucket, &key, &content_type, reader)
+        .await
+        .map_err(|e| match e {
+            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+            _ => S3Error::internal(e),
+        })?;
+
+    // Get destination metadata for LastModified
+    let dst_meta = state
+        .storage
+        .head_object(&bucket, &key)
+        .await
+        .map_err(S3Error::internal)?;
+
+    let xml = to_xml(&CopyObjectResult {
+        etag: result.etag,
+        last_modified: dst_meta.last_modified,
+    })
+    .map_err(S3Error::internal)?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/xml")
+        .body(Body::from(xml))
         .unwrap())
 }
 

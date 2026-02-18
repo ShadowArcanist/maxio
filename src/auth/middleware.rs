@@ -3,6 +3,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use chrono::{NaiveDateTime, Utc};
 
 use crate::error::S3Error;
 use crate::server::AppState;
@@ -18,6 +19,13 @@ pub async fn auth_middleware(
     let uri = request.uri().to_string();
 
     tracing::debug!("{} {}", method, uri);
+
+    let query = request.uri().query().unwrap_or("").to_string();
+
+    // Detect presigned URL by presence of X-Amz-Signature in query string
+    if query.contains("X-Amz-Signature=") {
+        return handle_presigned(&state, &method, &query, request, next).await;
+    }
 
     let auth_header = match request.headers().get("authorization") {
         Some(h) => h
@@ -61,11 +69,9 @@ pub async fn auth_middleware(
     }
 
     let path = request.uri().path().to_string();
-    let query = request.uri().query().unwrap_or("").to_string();
 
     tracing::debug!("Verifying signature for {} {} ?{}", method, path, query);
 
-    // Log all headers that are part of signing
     for h in &parsed.signed_headers {
         let val = request
             .headers()
@@ -92,5 +98,61 @@ pub async fn auth_middleware(
     tracing::debug!("Signature verification OK");
     let response = next.run(request).await;
     tracing::debug!("{} {} -> {}", method, uri, response.status());
+    Ok(response)
+}
+
+async fn handle_presigned(
+    state: &AppState,
+    method: &str,
+    query: &str,
+    request: Request,
+    next: Next,
+) -> Result<Response, S3Error> {
+    tracing::debug!("Presigned URL detected");
+
+    let (parsed, timestamp, expires_secs) = signature_v4::parse_presigned_query(query)
+        .map_err(|e| S3Error::access_denied(e))?;
+
+    if parsed.access_key != state.config.access_key {
+        return Err(S3Error::invalid_access_key());
+    }
+
+    if parsed.region != state.config.region {
+        return Err(S3Error::access_denied("Invalid region in credential scope"));
+    }
+
+    // Check expiration
+    let issued_at = NaiveDateTime::parse_from_str(&timestamp, "%Y%m%dT%H%M%SZ")
+        .map_err(|_| S3Error::access_denied("Invalid X-Amz-Date format"))?;
+    let expires_at = issued_at
+        + chrono::Duration::seconds(expires_secs as i64);
+    let now = Utc::now().naive_utc();
+
+    if now > expires_at {
+        tracing::debug!("Presigned URL expired: issued={}, expires={}, now={}", issued_at, expires_at, now);
+        return Err(S3Error::expired_presigned_url());
+    }
+
+    let path = request.uri().path().to_string();
+
+    tracing::debug!("Verifying presigned signature for {} {} ?{}", method, path, query);
+
+    let valid = signature_v4::verify_presigned_signature(
+        method,
+        &path,
+        query,
+        request.headers(),
+        &parsed,
+        &timestamp,
+        &state.config.secret_key,
+    );
+
+    if !valid {
+        tracing::debug!("Presigned signature verification FAILED");
+        return Err(S3Error::signature_mismatch());
+    }
+
+    tracing::debug!("Presigned signature verification OK");
+    let response = next.run(request).await;
     Ok(response)
 }

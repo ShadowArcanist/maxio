@@ -71,9 +71,120 @@ pub fn verify_signature(
 
     tracing::debug!("Canonical request:\n{}", canonical_request);
 
-    let string_to_sign = build_string_to_sign(&canonical_request, headers, parsed);
+    let timestamp = headers
+        .get("x-amz-date")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let string_to_sign = build_string_to_sign(&canonical_request, timestamp, parsed);
 
     tracing::debug!("String to sign:\n{}", string_to_sign);
+
+    let signing_key = derive_signing_key(secret_key, &parsed.date, &parsed.region);
+
+    let mut mac = HmacSha256::new_from_slice(&signing_key).unwrap();
+    mac.update(string_to_sign.as_bytes());
+    let computed = hex::encode(mac.finalize().into_bytes());
+
+    tracing::debug!("Computed signature: {}", computed);
+    tracing::debug!("Provided signature: {}", parsed.signature);
+
+    constant_time_eq(computed.as_bytes(), parsed.signature.as_bytes())
+}
+
+/// Parse presigned URL query parameters into auth components.
+/// Returns (ParsedAuth, timestamp, expires_seconds).
+pub fn parse_presigned_query(query: &str) -> Result<(ParsedAuth, String, u64), &'static str> {
+    let mut algorithm = None;
+    let mut credential = None;
+    let mut date = None;
+    let mut expires = None;
+    let mut signed_headers = None;
+    let mut signature = None;
+
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let val = parts.next().unwrap_or("");
+        match key {
+            "X-Amz-Algorithm" => algorithm = Some(val),
+            "X-Amz-Credential" => credential = Some(val),
+            "X-Amz-Date" => date = Some(val),
+            "X-Amz-Expires" => expires = Some(val),
+            "X-Amz-SignedHeaders" => signed_headers = Some(val),
+            "X-Amz-Signature" => signature = Some(val),
+            _ => {}
+        }
+    }
+
+    let algorithm = algorithm.ok_or("Missing X-Amz-Algorithm")?;
+    if algorithm != "AWS4-HMAC-SHA256" {
+        return Err("Invalid X-Amz-Algorithm");
+    }
+
+    let credential = credential.ok_or("Missing X-Amz-Credential")?;
+    let timestamp = date.ok_or("Missing X-Amz-Date")?.to_string();
+    let expires_str = expires.ok_or("Missing X-Amz-Expires")?;
+    let signed_headers = signed_headers.ok_or("Missing X-Amz-SignedHeaders")?;
+    let signature = signature.ok_or("Missing X-Amz-Signature")?;
+
+    let expires_secs: u64 = expires_str.parse().map_err(|_| "Invalid X-Amz-Expires")?;
+    if expires_secs > 604800 {
+        return Err("X-Amz-Expires exceeds maximum of 604800 seconds");
+    }
+
+    // Credential is URL-encoded: access_key%2Fdate%2Fregion%2Fs3%2Faws4_request
+    let credential_decoded = percent_encoding::percent_decode_str(credential)
+        .decode_utf8()
+        .map_err(|_| "Invalid Credential encoding")?;
+    let cred_parts: Vec<&str> = credential_decoded.splitn(5, '/').collect();
+    if cred_parts.len() != 5 {
+        return Err("Invalid Credential format");
+    }
+
+    let parsed = ParsedAuth {
+        access_key: cred_parts[0].to_string(),
+        date: cred_parts[1].to_string(),
+        region: cred_parts[2].to_string(),
+        signed_headers: signed_headers.split(';').map(|s| s.to_string()).collect(),
+        signature: signature.to_string(),
+    };
+
+    Ok((parsed, timestamp, expires_secs))
+}
+
+/// Verify a presigned URL signature.
+pub fn verify_presigned_signature(
+    method: &str,
+    uri: &str,
+    query_string: &str,
+    headers: &HeaderMap,
+    parsed: &ParsedAuth,
+    timestamp: &str,
+    secret_key: &str,
+) -> bool {
+    // Build canonical query string excluding X-Amz-Signature
+    let filtered_qs: String = query_string
+        .split('&')
+        .filter(|pair| !pair.starts_with("X-Amz-Signature="))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let canonical_uri = canonical_uri(uri);
+    let canonical_qs = canonical_query_string(&filtered_qs);
+    let canonical_hdrs = canonical_headers(headers, &parsed.signed_headers);
+    let signed_headers = parsed.signed_headers.join(";");
+
+    let canonical_request = format!(
+        "{}\n{}\n{}\n{}\n{}\nUNSIGNED-PAYLOAD",
+        method, canonical_uri, canonical_qs, canonical_hdrs, signed_headers
+    );
+
+    tracing::debug!("Presigned canonical request:\n{}", canonical_request);
+
+    let string_to_sign = build_string_to_sign(&canonical_request, timestamp, parsed);
+
+    tracing::debug!("Presigned string to sign:\n{}", string_to_sign);
 
     let signing_key = derive_signing_key(secret_key, &parsed.date, &parsed.region);
 
@@ -179,14 +290,9 @@ fn canonical_headers(headers: &HeaderMap, signed_headers: &[String]) -> String {
 
 fn build_string_to_sign(
     canonical_request: &str,
-    headers: &HeaderMap,
+    timestamp: &str,
     parsed: &ParsedAuth,
 ) -> String {
-    let timestamp = headers
-        .get("x-amz-date")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
     let scope = format!("{}/{}/s3/aws4_request", parsed.date, parsed.region);
 
     let hash = Sha256::digest(canonical_request.as_bytes());
@@ -198,7 +304,7 @@ fn build_string_to_sign(
     )
 }
 
-fn derive_signing_key(secret_key: &str, date: &str, region: &str) -> Vec<u8> {
+pub fn derive_signing_key(secret_key: &str, date: &str, region: &str) -> Vec<u8> {
     let key = format!("AWS4{}", secret_key);
 
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).unwrap();

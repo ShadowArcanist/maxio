@@ -7,6 +7,8 @@
   import Download from 'lucide-svelte/icons/download'
   import Upload from 'lucide-svelte/icons/upload'
   import Trash2 from 'lucide-svelte/icons/trash-2'
+  import Share2 from 'lucide-svelte/icons/share-2'
+  import Check from 'lucide-svelte/icons/check'
 
   interface Props {
     bucket: string
@@ -29,6 +31,16 @@
   let error = $state<string | null>(null)
   let uploading = $state(false)
   let fileInput: HTMLInputElement | undefined = $state()
+  let copiedKey = $state<string | null>(null)
+  let shareMenuKey = $state<string | null>(null)
+  let shareMenuPos = $state({ top: 0, left: 0 })
+
+  const expiryOptions = [
+    { label: '1 hour', seconds: 3600 },
+    { label: '6 hours', seconds: 21600 },
+    { label: '24 hours', seconds: 86400 },
+    { label: '7 days', seconds: 604800 },
+  ]
 
   async function fetchObjects() {
     loading = true
@@ -43,7 +55,8 @@
       } else {
         error = `Failed to load objects (${res.status})`
       }
-    } catch {
+    } catch (err) {
+      console.error('fetchObjects failed:', err)
       error = 'Failed to connect to server'
     } finally {
       loading = false
@@ -131,7 +144,8 @@
       }
       if (fileInput) fileInput.value = ''
       await fetchObjects()
-    } catch {
+    } catch (err) {
+      console.error('Upload failed:', err)
       error = 'Failed to upload file'
     } finally {
       uploading = false
@@ -150,12 +164,54 @@
         const data = await res.json()
         error = data.error || `Failed to delete object`
       }
-    } catch {
+    } catch (err) {
+      console.error('deleteObject failed:', err)
       error = 'Failed to connect to server'
     }
   }
 
-  onMount(fetchObjects)
+  function toggleShareMenu(key: string, e: MouseEvent) {
+    e.stopPropagation()
+    if (shareMenuKey === key) {
+      shareMenuKey = null
+      return
+    }
+    const btn = e.currentTarget as HTMLElement
+    const rect = btn.getBoundingClientRect()
+    shareMenuPos = { top: rect.top, left: rect.right }
+    shareMenuKey = key
+  }
+
+  async function shareObject(key: string, expires: number) {
+    shareMenuKey = null
+    error = null
+    try {
+      const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/presign/${key}?expires=${expires}`)
+      if (!res.ok) {
+        const data = await res.json()
+        console.error('Presign failed:', res.status, data)
+        error = data.error || 'Failed to generate share link'
+        return
+      }
+      const data = await res.json()
+      await navigator.clipboard.writeText(data.url)
+      copiedKey = key
+      setTimeout(() => { copiedKey = null }, 2000)
+    } catch (err) {
+      console.error('shareObject failed:', err)
+      error = 'Failed to generate share link'
+    }
+  }
+
+  function handleClickOutside(e: MouseEvent) {
+    if (shareMenuKey) shareMenuKey = null
+  }
+
+  onMount(() => {
+    fetchObjects()
+    document.addEventListener('click', handleClickOutside)
+    return () => document.removeEventListener('click', handleClickOutside)
+  })
 </script>
 
 <div class="flex flex-col gap-4">
@@ -192,7 +248,7 @@
           <Table.Head>Name</Table.Head>
           <Table.Head class="w-28 text-right">Size</Table.Head>
           <Table.Head class="w-48">Modified</Table.Head>
-          <Table.Head class="w-20"></Table.Head>
+          <Table.Head class="w-24"></Table.Head>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -219,8 +275,19 @@
             </Table.Cell>
             <Table.Cell class="text-right text-muted-foreground">{formatSize(file.size)}</Table.Cell>
             <Table.Cell class="text-muted-foreground">{formatDate(file.lastModified)}</Table.Cell>
-            <Table.Cell class="w-20">
+            <Table.Cell class="w-24">
               <span class="flex items-center gap-1">
+                <button
+                  class="text-muted-foreground hover:text-foreground transition-colors"
+                  onclick={(e) => toggleShareMenu(file.key, e)}
+                  title="Copy presigned URL"
+                >
+                  {#if copiedKey === file.key}
+                    <Check class="size-4 text-green-500" />
+                  {:else}
+                    <Share2 class="size-4" />
+                  {/if}
+                </button>
                 <a href={downloadUrl(file.key)} class="text-muted-foreground hover:text-foreground" onclick={(e) => e.stopPropagation()} title="Download">
                   <Download class="size-4" />
                 </a>
@@ -239,3 +306,20 @@
     </Table.Root>
   {/if}
 </div>
+
+{#if shareMenuKey}
+  <div
+    class="fixed z-50 min-w-[8rem] rounded-sm border bg-popover p-1 shadow-md"
+    style="top: {shareMenuPos.top}px; left: {shareMenuPos.left}px; transform: translate(-100%, -100%);"
+    onclick={(e) => e.stopPropagation()}
+  >
+    {#each expiryOptions as opt}
+      <button
+        class="w-full rounded-sm px-2 py-1.5 text-left text-sm text-popover-foreground hover:bg-accent hover:text-accent-foreground"
+        onclick={() => shareObject(shareMenuKey!, opt.seconds)}
+      >
+        {opt.label}
+      </button>
+    {/each}
+  </div>
+{/if}

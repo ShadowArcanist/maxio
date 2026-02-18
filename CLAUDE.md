@@ -69,12 +69,12 @@ kill %1 && rm -rf /tmp/maxio-test
 **Hot-reload dev server** (for manual testing):
 
 ```bash
-# Terminal 1: Rust server (in debug mode, reads ui/dist from disk live)
-RUST_LOG=debug cargo watch -x 'run -- --data-dir ./data'
-
-# Terminal 2: Vite rebuilds ui/dist on source changes
-cd ui && bun run build -- --watch
+just dev
 ```
+
+This runs both processes concurrently (Ctrl+C kills both):
+- `cargo watch` — rebuilds and restarts the Rust server on changes
+- `bun run build --watch` — rebuilds `ui/dist/` on frontend changes
 
 ## Architecture
 
@@ -85,7 +85,7 @@ cd ui && bun run build -- --watch
 - `src/server.rs` — Axum router construction, AppState, middleware wiring
 - `src/error.rs` — S3Error with XML error response rendering
 - `src/auth/` — AWS Signature V4 verification + Axum middleware
-- `src/api/` — S3 API handlers (bucket.rs, object.rs, list.rs, router.rs)
+- `src/api/` — S3 API handlers (bucket.rs, object.rs, multipart.rs, list.rs, router.rs)
 - `src/storage/` — Filesystem storage (buckets as dirs, objects as files, JSON sidecar metadata)
 - `src/xml/` — S3 XML response types (serde + quick-xml)
 
@@ -105,6 +105,11 @@ cd ui && bun run build -- --watch
 └── buckets/
     └── my-bucket/
         ├── .bucket.json                    # bucket metadata
+        ├── .uploads/                       # in-progress multipart uploads
+        │   └── {uploadId}/
+        │       ├── .meta.json              # MultipartUploadMeta (key, content_type, initiated)
+        │       ├── 1                       # part 1 bytes
+        │       └── 1.meta.json             # PartMeta (part_number, etag, size)
         ├── photos/
         │   ├── vacation.jpg                # object data
         │   └── vacation.jpg.meta.json      # object metadata (etag, size, content_type, last_modified)
@@ -112,7 +117,7 @@ cd ui && bun run build -- --watch
             └── readme.txt.meta.json
 ```
 
-### S3 Operations Implemented (Phase 1)
+### S3 Operations Implemented
 
 | Operation | Method | Path |
 |---|---|---|
@@ -122,10 +127,18 @@ cd ui && bun run build -- --watch
 | DeleteBucket | DELETE | `/{bucket}` |
 | GetBucketLocation | GET | `/{bucket}?location` |
 | ListObjectsV2 | GET | `/{bucket}?list-type=2` |
+| DeleteObjects | POST | `/{bucket}?delete` |
 | PutObject | PUT | `/{bucket}/{key}` |
 | GetObject | GET | `/{bucket}/{key}` |
 | HeadObject | HEAD | `/{bucket}/{key}` |
 | DeleteObject | DELETE | `/{bucket}/{key}` |
+| CopyObject | PUT | `/{bucket}/{key}` (with `x-amz-copy-source` header) |
+| CreateMultipartUpload | POST | `/{bucket}/{key}?uploads` |
+| UploadPart | PUT | `/{bucket}/{key}?partNumber=N&uploadId=X` |
+| CompleteMultipartUpload | POST | `/{bucket}/{key}?uploadId=X` |
+| AbortMultipartUpload | DELETE | `/{bucket}/{key}?uploadId=X` |
+| ListParts | GET | `/{bucket}/{key}?uploadId=X` |
+| ListMultipartUploads | GET | `/{bucket}?uploads` |
 
 ### Testing with MinIO Client (mc)
 
@@ -199,6 +212,6 @@ The web console (`ui/`) follows the Coolify design system. The full specificatio
 
 ## Roadmap
 
-- **Phase 2**: Multipart upload, presigned URLs, CopyObject, DeleteObjects batch, CORS, Range headers
+- **Phase 2**: ~~Multipart upload~~, presigned URLs, ~~CopyObject~~, ~~DeleteObjects batch~~, CORS, Range headers
 - **Phase 3**: Web console (SPA at `/ui/`), versioning, lifecycle rules, multi-user, metrics
 - **Phase 4**: Distributed mode, erasure coding, replication

@@ -7,14 +7,14 @@
   import LogOut from "lucide-svelte/icons/log-out";
   import PanelLeftClose from "lucide-svelte/icons/panel-left-close";
   import PanelLeftOpen from "lucide-svelte/icons/panel-left-open";
-  import HardDrive from "lucide-svelte/icons/hard-drive";
+
   import ArrowLeft from "lucide-svelte/icons/arrow-left";
   import ChevronRight from "lucide-svelte/icons/chevron-right";
   import Sun from "lucide-svelte/icons/sun";
   import Moon from "lucide-svelte/icons/moon";
 
   let authenticated = $state<boolean | null>(null);
-  let collapsed = $state(false);
+  let collapsed = $state(localStorage.getItem("sidebar-collapsed") === "true");
   let selectedBucket = $state<string | null>(null);
   let objectBrowserRef = $state<ObjectBrowser | null>(null);
   let currentPrefix = $state("");
@@ -116,7 +116,7 @@
     >
       <!-- Collapse/expand toggle -->
       <button
-        onclick={() => (collapsed = !collapsed)}
+        onclick={() => { collapsed = !collapsed; localStorage.setItem("sidebar-collapsed", String(collapsed)); }}
         class="absolute top-4 -right-3 z-10 flex size-6 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors hover:text-foreground"
         style="border-color: var(--cool-sidebar-border);"
         title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -135,11 +135,13 @@
         class:justify-center={collapsed}
         style="border-bottom: 1px solid var(--cool-sidebar-border);"
       >
-        {#if collapsed}
-          <HardDrive class="size-5 text-primary" />
-        {:else}
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" class="size-6 shrink-0">
+          <rect width="32" height="32" rx="6" fill="#6b16ed"/>
+          <text x="16" y="23" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700" fill="white">M</text>
+        </svg>
+        {#if !collapsed}
           <span
-            class="text-lg font-bold tracking-tight text-foreground whitespace-nowrap"
+            class="ml-2 text-lg font-bold tracking-tight text-foreground whitespace-nowrap"
             >MaxIO</span
           >
         {/if}

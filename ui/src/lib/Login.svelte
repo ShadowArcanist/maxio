@@ -30,7 +30,8 @@
       } else {
         error = 'Invalid credentials'
       }
-    } catch {
+    } catch (err) {
+      console.error('Login failed:', err)
       error = 'Connection failed'
     } finally {
       loading = false

@@ -10,8 +10,9 @@ use axum::{
 };
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
+use crate::auth::signature_v4;
 use crate::server::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -313,6 +314,116 @@ pub async fn download_object(
         .into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct PresignParams {
+    expires: Option<u64>,
+}
+
+pub async fn presign_object(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<PresignParams>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Verify object exists
+    match state.storage.head_object(&bucket, &key).await {
+        Ok(_) => {}
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Object not found"})),
+            )
+                .into_response()
+        }
+    }
+
+    let expires_secs = params.expires.unwrap_or(3600).min(604800);
+
+    // Determine the host from the request
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:9000");
+
+    let now = chrono::Utc::now();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let region = &state.config.region;
+    let access_key = &state.config.access_key;
+
+    let credential = format!("{}/{}/{}/s3/aws4_request", access_key, date_stamp, region);
+    let path = format!("/{}/{}", bucket, key);
+
+    // Build query string params (sorted alphabetically, excluding Signature)
+    let qs_params = [
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+        ("X-Amz-Credential", credential.clone()),
+        ("X-Amz-Date", amz_date.clone()),
+        ("X-Amz-Expires", expires_secs.to_string()),
+        ("X-Amz-SignedHeaders", "host".to_string()),
+    ];
+
+    const S3_ENCODE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+    let encode =
+        |s: &str| -> String { percent_encoding::utf8_percent_encode(s, S3_ENCODE).to_string() };
+
+    let canonical_qs: String = qs_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let canonical_headers = format!("host:{}\n", host);
+    let canonical_request = format!(
+        "GET\n{}\n{}\n{}\nhost\nUNSIGNED-PAYLOAD",
+        path, canonical_qs, canonical_headers
+    );
+
+    let scope = format!("{}/{}/s3/aws4_request", date_stamp, region);
+    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date, scope, canonical_hash
+    );
+
+    let signing_key =
+        signature_v4::derive_signing_key(&state.config.secret_key, &date_stamp, region);
+
+    let mut mac = HmacSha256::new_from_slice(&signing_key).unwrap();
+    mac.update(string_to_sign.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    // Determine scheme
+    let scheme = if headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "https")
+        .unwrap_or(false)
+    {
+        "https"
+    } else {
+        "http"
+    };
+
+    let presigned_url = format!(
+        "{}://{}{}?{}&X-Amz-Signature={}",
+        scheme, host, path, canonical_qs, signature
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "url": presigned_url,
+            "expiresIn": expires_secs,
+        })),
+    )
+        .into_response()
+}
+
 pub fn console_router(state: AppState) -> Router<AppState> {
     let public = Router::new()
         .route("/auth/login", post(login))
@@ -327,6 +438,7 @@ pub fn console_router(state: AppState) -> Router<AppState> {
         .route("/buckets/{bucket}/objects/{*key}", delete(delete_object_api))
         .route("/buckets/{bucket}/upload/{*key}", put(upload_object))
         .route("/buckets/{bucket}/download/{*key}", get(download_object))
+        .route("/buckets/{bucket}/presign/{*key}", get(presign_object))
         .layer(axum::middleware::from_fn_with_state(
             state,
             console_auth_middleware,

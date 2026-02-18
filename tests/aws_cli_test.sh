@@ -174,6 +174,18 @@ assert_eq "create abortable multipart upload id" "true" "$([ -n "$ABORT_ID" ] &&
 assert "abort multipart upload" $AWS s3api abort-multipart-upload --bucket "$BUCKET" --key "abort-multipart.bin" --upload-id "$ABORT_ID"
 assert_fail "list-parts after abort should fail" $AWS s3api list-parts --bucket "$BUCKET" --key "abort-multipart.bin" --upload-id "$ABORT_ID"
 
+# --- Copy object ---
+assert "copy object same bucket" $AWS s3 cp "s3://$BUCKET/test.txt" "s3://$BUCKET/test-copy.txt"
+assert "download copied object" $AWS s3 cp "s3://$BUCKET/test-copy.txt" "$TMPDIR/copy.txt"
+assert_eq "copied content matches" "hello maxio" "$(cat "$TMPDIR/copy.txt")"
+assert_file_exists "copied object on disk" "$DATA_DIR/buckets/$BUCKET/test-copy.txt"
+
+# Copy object via s3api
+OUTPUT=$($AWS s3api copy-object --bucket "$BUCKET" --key "api-copy.txt" --copy-source "$BUCKET/test.txt" 2>&1)
+assert_eq "copy-object has ETag" "true" "$(echo "$OUTPUT" | grep -q "ETag" && echo true || echo false)"
+assert "download api-copied object" $AWS s3 cp "s3://$BUCKET/api-copy.txt" "$TMPDIR/api-copy.txt"
+assert_eq "api-copied content matches" "hello maxio" "$(cat "$TMPDIR/api-copy.txt")"
+
 # --- Overwrite object ---
 echo "updated content" > "$TMPDIR/updated.txt"
 assert "overwrite object" $AWS s3 cp "$TMPDIR/updated.txt" "s3://$BUCKET/test.txt"
@@ -187,6 +199,8 @@ assert_file_not_exists "deleted object gone from disk" "$DATA_DIR/buckets/$BUCKE
 assert_file_not_exists "deleted meta gone from disk" "$DATA_DIR/buckets/$BUCKET/test.txt.meta.json"
 assert_fail "get deleted object" $AWS s3 cp "s3://$BUCKET/test.txt" "$TMPDIR/should-not-exist.txt"
 
+assert "delete copied object" $AWS s3 rm "s3://$BUCKET/test-copy.txt"
+assert "delete api-copied object" $AWS s3 rm "s3://$BUCKET/api-copy.txt"
 assert "delete nested object" $AWS s3 rm "s3://$BUCKET/folder/nested/file.txt"
 assert_file_not_exists "deleted nested object gone from disk" "$DATA_DIR/buckets/$BUCKET/folder/nested/file.txt"
 assert "delete large object" $AWS s3 rm "s3://$BUCKET/big.bin"

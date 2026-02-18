@@ -38,6 +38,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Secret Key: [REDACTED]");
     tracing::info!("Data dir:   {}", config.data_dir);
     tracing::info!("Region:     {}", config.region);
+    let display_host = if config.address == "0.0.0.0" { "localhost" } else { &config.address };
+    tracing::info!("Web UI:     http://{}:{}/ui/", display_host, config.port);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

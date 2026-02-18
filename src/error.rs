@@ -26,6 +26,7 @@ pub enum S3ErrorCode {
     NoSuchUpload,
     NotImplemented,
     EntityTooSmall,
+    ExpiredPresignedUrl,
     SignatureDoesNotMatch,
 }
 
@@ -47,15 +48,17 @@ impl S3ErrorCode {
             Self::NoSuchUpload => "NoSuchUpload",
             Self::NotImplemented => "NotImplemented",
             Self::EntityTooSmall => "EntityTooSmall",
+            Self::ExpiredPresignedUrl => "AccessDenied",
             Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
         }
     }
 
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::AccessDenied | Self::InvalidAccessKeyId | Self::SignatureDoesNotMatch => {
-                StatusCode::FORBIDDEN
-            }
+            Self::AccessDenied
+            | Self::ExpiredPresignedUrl
+            | Self::InvalidAccessKeyId
+            | Self::SignatureDoesNotMatch => StatusCode::FORBIDDEN,
             Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload => StatusCode::NOT_FOUND,
             Self::BucketAlreadyOwnedByYou | Self::BucketNotEmpty => StatusCode::CONFLICT,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -163,6 +166,14 @@ impl S3Error {
             code: S3ErrorCode::EntityTooSmall,
             message:
                 "Your proposed upload is smaller than the minimum allowed object size.".into(),
+            resource: None,
+        }
+    }
+
+    pub fn expired_presigned_url() -> Self {
+        Self {
+            code: S3ErrorCode::ExpiredPresignedUrl,
+            message: "Request has expired".into(),
             resource: None,
         }
     }

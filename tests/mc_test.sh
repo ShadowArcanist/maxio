@@ -144,6 +144,12 @@ assert_eq "large object sha256 matches" "$(shasum -a 256 "$TMPDIR/big.bin" | awk
 OUTPUT=$(mc stat "$ALIAS/$BUCKET/big.bin" 2>&1)
 assert_eq "multipart etag suffix present" "true" "$(echo "$OUTPUT" | grep -Eq 'ETag.*-[0-9]+' && echo true || echo false)"
 
+# --- Copy object (server-side) ---
+assert "copy object same bucket" mc cp "$ALIAS/$BUCKET/test.txt" "$ALIAS/$BUCKET/test-copy.txt"
+assert "download copied object" mc cp "$ALIAS/$BUCKET/test-copy.txt" "$TMPDIR/copy.txt"
+assert_eq "copied content matches" "hello maxio" "$(cat "$TMPDIR/copy.txt")"
+assert_file_exists "copied object on disk" "$DATA_DIR/buckets/$BUCKET/test-copy.txt"
+
 # --- Overwrite object ---
 echo "updated content" > "$TMPDIR/updated.txt"
 assert "overwrite object" mc cp "$TMPDIR/updated.txt" "$ALIAS/$BUCKET/test.txt"
@@ -158,6 +164,7 @@ assert_file_not_exists "deleted object gone from disk" "$DATA_DIR/buckets/$BUCKE
 assert_file_not_exists "deleted meta gone from disk" "$DATA_DIR/buckets/$BUCKET/test.txt.meta.json"
 assert_fail "get deleted object" mc cat "$ALIAS/$BUCKET/test.txt"
 
+assert "delete copied object" mc rm "$ALIAS/$BUCKET/test-copy.txt"
 assert "delete nested object" mc rm "$ALIAS/$BUCKET/folder/nested/file.txt"
 assert_file_not_exists "deleted nested object gone from disk" "$DATA_DIR/buckets/$BUCKET/folder/nested/file.txt"
 assert "delete large object" mc rm "$ALIAS/$BUCKET/big.bin"

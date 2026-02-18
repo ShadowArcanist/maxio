@@ -35,7 +35,8 @@
       } else {
         error = `Failed to load buckets (${res.status})`
       }
-    } catch {
+    } catch (err) {
+      console.error('fetchBuckets failed:', err)
       error = 'Failed to connect to server'
     } finally {
       loading = false
@@ -60,7 +61,8 @@
         const data = await res.json()
         error = data.error || `Failed to create bucket (${res.status})`
       }
-    } catch {
+    } catch (err) {
+      console.error('createBucket failed:', err)
       error = 'Failed to connect to server'
     } finally {
       creating = false
@@ -79,7 +81,8 @@
         const data = await res.json()
         error = data.error || `Failed to delete bucket (${res.status})`
       }
-    } catch {
+    } catch (err) {
+      console.error('deleteBucket failed:', err)
       error = 'Failed to connect to server'
     }
   }

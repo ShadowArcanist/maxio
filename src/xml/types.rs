@@ -179,3 +179,12 @@ pub struct ListMultipartUploadsResult {
     #[serde(rename = "Upload", default)]
     pub uploads: Vec<MultipartUploadEntry>,
 }
+
+#[derive(Serialize)]
+#[serde(rename = "CopyObjectResult")]
+pub struct CopyObjectResult {
+    #[serde(rename = "ETag")]
+    pub etag: String,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+}
