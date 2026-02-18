@@ -179,6 +179,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: maxio-linux-*
           merge-multiple: true
 
       - name: Create GitHub Release
