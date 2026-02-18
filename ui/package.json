@@ -1,0 +1,30 @@
+{
+  "name": "ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tsconfig/svelte": "^5.0.6",
+    "@types/node": "^24.10.1",
+    "svelte": "^5.45.2",
+    "svelte-check": "^4.3.4",
+    "tailwindcss": "^4.1.18",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "bits-ui": "^2.15.7",
+    "clsx": "^2.1.1",
+    "lucide-svelte": "^0.574.0",
+    "tailwind-merge": "^3.4.1",
+    "tailwind-variants": "^3.2.2"
+  }
+}

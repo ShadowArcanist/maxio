@@ -1,2 +1,4 @@
 /target
 /data
+/ui/dist
+/ui/node_modules
