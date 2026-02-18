@@ -188,3 +188,61 @@ pub struct CopyObjectResult {
     #[serde(rename = "LastModified")]
     pub last_modified: String,
 }
+
+#[derive(Serialize)]
+#[serde(rename = "VersioningConfiguration")]
+pub struct VersioningConfiguration {
+    #[serde(rename = "Status", skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "ListVersionsResult")]
+pub struct ListVersionsResult {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Prefix")]
+    pub prefix: String,
+    #[serde(rename = "KeyMarker")]
+    pub key_marker: String,
+    #[serde(rename = "VersionIdMarker")]
+    pub version_id_marker: String,
+    #[serde(rename = "MaxKeys")]
+    pub max_keys: i32,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "Version", skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<VersionEntry>,
+    #[serde(rename = "DeleteMarker", skip_serializing_if = "Vec::is_empty")]
+    pub delete_markers: Vec<DeleteMarkerEntry>,
+}
+
+#[derive(Serialize)]
+pub struct VersionEntry {
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "VersionId")]
+    pub version_id: String,
+    #[serde(rename = "IsLatest")]
+    pub is_latest: bool,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
+    #[serde(rename = "Size")]
+    pub size: u64,
+    #[serde(rename = "StorageClass")]
+    pub storage_class: String,
+}
+
+#[derive(Serialize)]
+pub struct DeleteMarkerEntry {
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "VersionId")]
+    pub version_id: String,
+    #[serde(rename = "IsLatest")]
+    pub is_latest: bool,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+}

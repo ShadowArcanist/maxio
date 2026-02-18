@@ -30,6 +30,14 @@ pub async fn handle_bucket_get(
         return multipart::list_multipart_uploads(State(state), Path(bucket)).await;
     }
 
+    if params.contains_key("versioning") {
+        return super::bucket::get_bucket_versioning(state, bucket).await;
+    }
+
+    if params.contains_key("versions") {
+        return list_object_versions(state, bucket, params).await;
+    }
+
     // Handle ?location query (GetBucketLocation)
     if params.contains_key("location") {
         tracing::debug!("GetBucketLocation for {}", bucket);
@@ -240,4 +248,72 @@ fn split_by_delimiter(
             vec![],
         )
     }
+}
+
+async fn list_object_versions(
+    state: AppState,
+    bucket: String,
+    params: HashMap<String, String>,
+) -> Result<Response<Body>, S3Error> {
+    let prefix = params.get("prefix").cloned().unwrap_or_default();
+
+    let all_versions = state
+        .storage
+        .list_object_versions(&bucket, &prefix)
+        .await
+        .map_err(|e| S3Error::internal(e))?;
+
+    // Determine which version is latest per key (first in list since sorted newest-first per key)
+    let mut latest_per_key: HashMap<String, String> = HashMap::new();
+    for v in &all_versions {
+        if let Some(vid) = &v.version_id {
+            latest_per_key
+                .entry(v.key.clone())
+                .or_insert_with(|| vid.clone());
+        }
+    }
+
+    let mut versions = Vec::new();
+    let mut delete_markers = Vec::new();
+
+    for v in &all_versions {
+        let vid = v.version_id.as_deref().unwrap_or("null");
+        let is_latest = latest_per_key.get(&v.key).is_some_and(|latest| latest == vid);
+        if v.is_delete_marker {
+            delete_markers.push(DeleteMarkerEntry {
+                key: v.key.clone(),
+                version_id: vid.to_string(),
+                is_latest,
+                last_modified: v.last_modified.clone(),
+            });
+        } else {
+            versions.push(VersionEntry {
+                key: v.key.clone(),
+                version_id: vid.to_string(),
+                is_latest,
+                last_modified: v.last_modified.clone(),
+                etag: v.etag.clone(),
+                size: v.size,
+                storage_class: "STANDARD".to_string(),
+            });
+        }
+    }
+
+    let result = ListVersionsResult {
+        name: bucket,
+        prefix,
+        key_marker: String::new(),
+        version_id_marker: String::new(),
+        max_keys: 1000,
+        is_truncated: false,
+        versions,
+        delete_markers,
+    };
+
+    let xml = to_xml(&result).map_err(|e| S3Error::internal(e))?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/xml")
+        .body(Body::from(xml))
+        .unwrap())
 }

@@ -1,5 +1,6 @@
-use super::{BucketMeta, ByteStream, MultipartUploadMeta, ObjectMeta, PartMeta, PutResult, StorageError};
+use super::{BucketMeta, ByteStream, DeleteResult, MultipartUploadMeta, ObjectMeta, PartMeta, PutResult, StorageError};
 use md5::{Digest, Md5};
+use rand::RngExt;
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
@@ -187,12 +188,21 @@ impl FilesystemStorage {
 
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
+        let versioned = self.is_versioned(bucket).await.unwrap_or(false);
+        let version_id = if versioned {
+            Some(Self::generate_version_id())
+        } else {
+            None
+        };
+
         let meta = ObjectMeta {
             key: key.to_string(),
             size,
             etag: etag_quoted.clone(),
             content_type: content_type.to_string(),
             last_modified: now,
+            version_id: version_id.clone(),
+            is_delete_marker: false,
         };
 
         let meta_path = self.meta_path(bucket, key);
@@ -202,9 +212,14 @@ impl FilesystemStorage {
         let json = serde_json::to_string_pretty(&meta)?;
         fs::write(&meta_path, json).await?;
 
+        if versioned {
+            self.write_version(bucket, key, &meta, &obj_path).await?;
+        }
+
         Ok(PutResult {
             size,
             etag: etag_quoted,
+            version_id,
         })
     }
 
@@ -233,13 +248,19 @@ impl FilesystemStorage {
             etag: etag.clone(),
             content_type: "application/x-directory".to_string(),
             last_modified: now,
+            version_id: None,
+            is_delete_marker: false,
         };
 
         let meta_path = folder_dir.join(".folder.meta.json");
         let json = serde_json::to_string_pretty(&meta)?;
         fs::write(&meta_path, json).await?;
 
-        Ok(PutResult { size: 0, etag })
+        Ok(PutResult {
+            size: 0,
+            etag,
+            version_id: None,
+        })
     }
 
     pub async fn get_object(
@@ -293,8 +314,18 @@ impl FilesystemStorage {
         self.read_object_meta(bucket, key).await
     }
 
-    pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
+    pub async fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<DeleteResult, StorageError> {
         validate_key(key)?;
+
+        let versioned = self.is_versioned(bucket).await.unwrap_or(false);
+        if versioned {
+            return self.write_delete_marker(bucket, key).await;
+        }
+
         let obj_path = self.object_path(bucket, key);
         let meta_path = self.meta_path(bucket, key);
 
@@ -315,7 +346,10 @@ impl FilesystemStorage {
             dir = d.parent().map(|p| p.to_path_buf());
         }
 
-        Ok(())
+        Ok(DeleteResult {
+            version_id: None,
+            is_delete_marker: false,
+        })
     }
 
     pub async fn list_objects(
@@ -467,6 +501,8 @@ impl FilesystemStorage {
             etag: etag.clone(),
             content_type: upload_meta.content_type,
             last_modified: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+            version_id: None,
+            is_delete_marker: false,
         };
         let meta_path = self.meta_path(bucket, &upload_meta.key);
         if let Some(parent) = meta_path.parent() {
@@ -478,6 +514,7 @@ impl FilesystemStorage {
         Ok(PutResult {
             size: total_size,
             etag,
+            version_id: None,
         })
     }
 
@@ -553,7 +590,11 @@ impl FilesystemStorage {
             let mut entries = fs::read_dir(dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname == ".bucket.json" || fname == ".uploads" || fname.ends_with(".meta.json") {
+                if fname == ".bucket.json"
+                    || fname == ".uploads"
+                    || fname == ".versions"
+                    || fname.ends_with(".meta.json")
+                {
                     continue;
                 }
                 if entry.file_type().await?.is_dir() {
@@ -606,6 +647,7 @@ impl FilesystemStorage {
                 if fname.ends_with(".meta.json")
                     || fname == ".bucket.json"
                     || fname == ".uploads"
+                    || fname == ".versions"
                     || fname == ".folder"
                 {
                     continue;
@@ -676,5 +718,391 @@ impl FilesystemStorage {
             }
         })?;
         Ok(serde_json::from_str(&data)?)
+    }
+
+    // --- Versioning ---
+
+    fn generate_version_id() -> String {
+        let micros = chrono::Utc::now().timestamp_micros() as u64;
+        let rand_suffix: u32 = rand::rng().random();
+        format!("{:016}-{:08x}", micros, rand_suffix)
+    }
+
+    /// Directory holding versions for a given key.
+    /// For key `photos/vacation.jpg` → `{bucket}/photos/.versions/vacation.jpg/`
+    fn versions_dir(&self, bucket: &str, key: &str) -> PathBuf {
+        let key_path = Path::new(key);
+        let parent = key_path.parent().unwrap_or(Path::new(""));
+        let name = key_path.file_name().unwrap_or(std::ffi::OsStr::new(key));
+        self.buckets_dir
+            .join(bucket)
+            .join(parent)
+            .join(".versions")
+            .join(name)
+    }
+
+    fn version_data_path(&self, bucket: &str, key: &str, version_id: &str) -> PathBuf {
+        self.versions_dir(bucket, key)
+            .join(format!("{}.data", version_id))
+    }
+
+    fn version_meta_path(&self, bucket: &str, key: &str, version_id: &str) -> PathBuf {
+        self.versions_dir(bucket, key)
+            .join(format!("{}.meta.json", version_id))
+    }
+
+    pub async fn is_versioned(&self, bucket: &str) -> Result<bool, StorageError> {
+        let meta_path = self.buckets_dir.join(bucket).join(".bucket.json");
+        let data = fs::read_to_string(&meta_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(bucket.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        let meta: BucketMeta = serde_json::from_str(&data)?;
+        Ok(meta.versioning)
+    }
+
+    pub async fn set_versioning(
+        &self,
+        bucket: &str,
+        enabled: bool,
+    ) -> Result<(), StorageError> {
+        let meta_path = self.buckets_dir.join(bucket).join(".bucket.json");
+        let data = fs::read_to_string(&meta_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(bucket.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        let mut meta: BucketMeta = serde_json::from_str(&data)?;
+        let was_enabled = meta.versioning;
+        meta.versioning = enabled;
+        fs::write(&meta_path, serde_json::to_string_pretty(&meta)?).await?;
+
+        // If disabling versioning, clean up old versions
+        if was_enabled && !enabled {
+            self.cleanup_versions(bucket).await?;
+        }
+        Ok(())
+    }
+
+    /// Remove all `.versions/` directories in the bucket, keeping only current (top-level) files.
+    /// Also remove any objects whose latest version was a delete marker (restore nothing).
+    async fn cleanup_versions(&self, bucket: &str) -> Result<(), StorageError> {
+        let bucket_dir = self.buckets_dir.join(bucket);
+        self.cleanup_versions_recursive(&bucket_dir).await
+    }
+
+    fn cleanup_versions_recursive<'a>(
+        &'a self,
+        dir: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut entries = match fs::read_dir(dir).await {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if entry.file_type().await?.is_dir() {
+                    if fname == ".versions" {
+                        fs::remove_dir_all(entry.path()).await?;
+                    } else if fname != ".uploads" {
+                        self.cleanup_versions_recursive(&entry.path()).await?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Write a new version to the `.versions/` directory and update the current (top-level) files.
+    async fn write_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        meta: &ObjectMeta,
+        data_path: &Path,
+    ) -> Result<(), StorageError> {
+        let version_id = meta.version_id.as_ref().unwrap();
+        let ver_dir = self.versions_dir(bucket, key);
+        fs::create_dir_all(&ver_dir).await?;
+
+        // Copy data to version store
+        let ver_data = ver_dir.join(format!("{}.data", version_id));
+        fs::copy(data_path, &ver_data).await?;
+
+        // Write version metadata
+        let ver_meta = ver_dir.join(format!("{}.meta.json", version_id));
+        fs::write(&ver_meta, serde_json::to_string_pretty(meta)?).await?;
+
+        Ok(())
+    }
+
+    /// Write a delete marker version and remove the top-level files.
+    async fn write_delete_marker(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<DeleteResult, StorageError> {
+        let version_id = Self::generate_version_id();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+
+        let marker_meta = ObjectMeta {
+            key: key.to_string(),
+            size: 0,
+            etag: String::new(),
+            content_type: String::new(),
+            last_modified: now,
+            version_id: Some(version_id.clone()),
+            is_delete_marker: true,
+        };
+
+        let ver_dir = self.versions_dir(bucket, key);
+        fs::create_dir_all(&ver_dir).await?;
+        let ver_meta_path = ver_dir.join(format!("{}.meta.json", version_id));
+        fs::write(&ver_meta_path, serde_json::to_string_pretty(&marker_meta)?).await?;
+
+        // Remove top-level current files
+        let _ = fs::remove_file(self.object_path(bucket, key)).await;
+        let _ = fs::remove_file(self.meta_path(bucket, key)).await;
+
+        Ok(DeleteResult {
+            version_id: Some(version_id),
+            is_delete_marker: true,
+        })
+    }
+
+    /// Scan versions for a key and update the top-level files to reflect the latest non-delete-marker.
+    async fn update_current_version(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        let ver_dir = self.versions_dir(bucket, key);
+        if !fs::try_exists(&ver_dir).await.unwrap_or(false) {
+            return Ok(());
+        }
+
+        // Find the latest non-delete-marker version (lexicographic sort = chronological)
+        let mut versions = Vec::new();
+        let mut entries = fs::read_dir(&ver_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with(".meta.json") {
+                versions.push(fname);
+            }
+        }
+        versions.sort();
+        versions.reverse(); // newest first
+
+        for meta_fname in &versions {
+            let meta_path = ver_dir.join(meta_fname);
+            let data = fs::read_to_string(&meta_path).await?;
+            let meta: ObjectMeta = serde_json::from_str(&data)?;
+            if !meta.is_delete_marker {
+                // Restore this version as current
+                let vid = meta.version_id.as_ref().unwrap();
+                let ver_data = ver_dir.join(format!("{}.data", vid));
+                let obj_path = self.object_path(bucket, key);
+                let obj_meta_path = self.meta_path(bucket, key);
+                if let Some(parent) = obj_path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::copy(&ver_data, &obj_path).await?;
+                if let Some(parent) = obj_meta_path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(&obj_meta_path, serde_json::to_string_pretty(&meta)?).await?;
+                return Ok(());
+            }
+        }
+
+        // All versions are delete markers — remove top-level files
+        let _ = fs::remove_file(self.object_path(bucket, key)).await;
+        let _ = fs::remove_file(self.meta_path(bucket, key)).await;
+        Ok(())
+    }
+
+    pub async fn get_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<(ByteStream, ObjectMeta), StorageError> {
+        validate_key(key)?;
+        let ver_meta_path = self.version_meta_path(bucket, key, version_id);
+        let data = fs::read_to_string(&ver_meta_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::VersionNotFound(version_id.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        let meta: ObjectMeta = serde_json::from_str(&data)?;
+
+        if meta.is_delete_marker {
+            return Err(StorageError::NotFound(key.to_string()));
+        }
+
+        let ver_data_path = self.version_data_path(bucket, key, version_id);
+        let file = fs::File::open(&ver_data_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::VersionNotFound(version_id.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        Ok((Box::pin(BufReader::new(file)), meta))
+    }
+
+    pub async fn head_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<ObjectMeta, StorageError> {
+        validate_key(key)?;
+        let ver_meta_path = self.version_meta_path(bucket, key, version_id);
+        let data = fs::read_to_string(&ver_meta_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::VersionNotFound(version_id.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        let meta: ObjectMeta = serde_json::from_str(&data)?;
+        if meta.is_delete_marker {
+            return Err(StorageError::NotFound(key.to_string()));
+        }
+        Ok(meta)
+    }
+
+    pub async fn delete_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<ObjectMeta, StorageError> {
+        validate_key(key)?;
+        let ver_meta_path = self.version_meta_path(bucket, key, version_id);
+        let data = fs::read_to_string(&ver_meta_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::VersionNotFound(version_id.to_string())
+            } else {
+                StorageError::Io(e)
+            }
+        })?;
+        let meta: ObjectMeta = serde_json::from_str(&data)?;
+
+        // Remove version files
+        let _ = fs::remove_file(&ver_meta_path).await;
+        let ver_data_path = self.version_data_path(bucket, key, version_id);
+        let _ = fs::remove_file(&ver_data_path).await;
+
+        // Clean up empty versions dir
+        let ver_dir = self.versions_dir(bucket, key);
+        let _ = fs::remove_dir(&ver_dir).await; // only succeeds if empty
+
+        // Update current version (in case we deleted the latest or a delete marker)
+        self.update_current_version(bucket, key).await?;
+
+        Ok(meta)
+    }
+
+    pub async fn list_object_versions(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<Vec<ObjectMeta>, StorageError> {
+        let bucket_dir = self.buckets_dir.join(bucket);
+        let mut results = Vec::new();
+        self.walk_versions(&bucket_dir, &bucket_dir, prefix, &mut results)
+            .await?;
+        // Sort by key, then by version_id descending (newest first per key)
+        results.sort_by(|a, b| {
+            a.key.cmp(&b.key).then_with(|| {
+                let va = a.version_id.as_deref().unwrap_or("");
+                let vb = b.version_id.as_deref().unwrap_or("");
+                vb.cmp(va)
+            })
+        });
+        Ok(results)
+    }
+
+    fn walk_versions<'a>(
+        &'a self,
+        base: &'a Path,
+        dir: &'a Path,
+        prefix: &'a str,
+        results: &'a mut Vec<ObjectMeta>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut entries = match fs::read_dir(dir).await {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let fname = entry.file_name().to_string_lossy().to_string();
+
+                if !entry.file_type().await?.is_dir() {
+                    continue;
+                }
+
+                if fname == ".versions" {
+                    // Scan all key dirs inside .versions
+                    let mut key_dirs = match fs::read_dir(&path).await {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    while let Some(key_entry) = key_dirs.next_entry().await? {
+                        if !key_entry.file_type().await?.is_dir() {
+                            continue;
+                        }
+                        let key_name = key_entry.file_name().to_string_lossy().to_string();
+                        // Reconstruct the object key from the directory structure
+                        let parent_rel = dir.strip_prefix(base).unwrap_or(Path::new(""));
+                        let key = if parent_rel.as_os_str().is_empty() {
+                            key_name.clone()
+                        } else {
+                            format!("{}/{}", parent_rel.to_string_lossy(), key_name)
+                        };
+                        if !key.starts_with(prefix) {
+                            continue;
+                        }
+                        // Read all version meta files in this key's version dir
+                        let key_ver_dir = key_entry.path();
+                        let mut ver_entries = match fs::read_dir(&key_ver_dir).await {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                        while let Some(ve) = ver_entries.next_entry().await? {
+                            let vf = ve.file_name().to_string_lossy().to_string();
+                            if vf.ends_with(".meta.json") {
+                                if let Ok(data) = fs::read_to_string(ve.path()).await {
+                                    if let Ok(meta) = serde_json::from_str::<ObjectMeta>(&data) {
+                                        results.push(meta);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if fname != ".uploads" && fname != ".bucket.json" {
+                    self.walk_versions(base, &path, prefix, results).await?;
+                }
+            }
+            Ok(())
+        })
     }
 }

@@ -2,7 +2,7 @@ use axum::Router;
 use axum::routing::get;
 use std::sync::Arc;
 
-use crate::api::console::console_router;
+use crate::api::console::{console_router, LoginRateLimiter};
 use crate::api::router::s3_router;
 use crate::auth::middleware::auth_middleware;
 use crate::config::Config;
@@ -13,6 +13,7 @@ use crate::storage::filesystem::FilesystemStorage;
 pub struct AppState {
     pub storage: Arc<FilesystemStorage>,
     pub config: Arc<Config>,
+    pub login_rate_limiter: Arc<LoginRateLimiter>,
 }
 
 pub fn build_router(state: AppState) -> Router {

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Response,
 };
@@ -56,6 +58,7 @@ pub async fn create_bucket(
         name: bucket.clone(),
         created_at: now,
         region: state.config.region.clone(),
+        versioning: false,
     };
 
     let created = state
@@ -105,6 +108,81 @@ pub async fn delete_bucket(
         Err(StorageError::BucketNotEmpty) => Err(S3Error::bucket_not_empty(&bucket)),
         Err(e) => Err(S3Error::internal(e)),
     }
+}
+
+pub async fn handle_bucket_put(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Body,
+) -> Result<Response<Body>, S3Error> {
+    if params.contains_key("versioning") {
+        return put_bucket_versioning(State(state), Path(bucket), body).await;
+    }
+    create_bucket(State(state), Path(bucket)).await
+}
+
+async fn put_bucket_versioning(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    body: Body,
+) -> Result<Response<Body>, S3Error> {
+    match state.storage.head_bucket(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => return Err(S3Error::no_such_bucket(&bucket)),
+        Err(e) => return Err(S3Error::internal(e)),
+    }
+
+    let body_bytes = axum::body::to_bytes(body, 1024 * 64)
+        .await
+        .map_err(|e| S3Error::internal(e))?;
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Parse <VersioningConfiguration><Status>Enabled|Suspended</Status></VersioningConfiguration>
+    let enabled = if body_str.contains("<Status>Enabled</Status>") {
+        true
+    } else if body_str.contains("<Status>Suspended</Status>") {
+        false
+    } else {
+        false
+    };
+
+    state
+        .storage
+        .set_versioning(&bucket, enabled)
+        .await
+        .map_err(|e| S3Error::internal(e))?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .unwrap())
+}
+
+pub async fn get_bucket_versioning(
+    state: AppState,
+    bucket: String,
+) -> Result<Response<Body>, S3Error> {
+    let versioned = state
+        .storage
+        .is_versioned(&bucket)
+        .await
+        .map_err(|e| S3Error::internal(e))?;
+
+    let result = VersioningConfiguration {
+        status: if versioned {
+            Some("Enabled".to_string())
+        } else {
+            None
+        },
+    };
+
+    let xml = to_xml(&result).map_err(|e| S3Error::internal(e))?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/xml")
+        .body(Body::from(xml))
+        .unwrap())
 }
 
 fn validate_bucket_name(name: &str) -> Result<(), S3Error> {

@@ -78,12 +78,14 @@ pub async fn put_object(
         }
     }
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("ETag", &result.etag)
-        .header("Content-Length", result.size.to_string())
-        .body(Body::empty())
-        .unwrap())
+        .header("Content-Length", result.size.to_string());
+    if let Some(vid) = &result.version_id {
+        builder = builder.header("x-amz-version-id", vid.as_str());
+    }
+    Ok(builder.body(Body::empty()).unwrap())
 }
 
 async fn copy_object(
@@ -161,11 +163,13 @@ async fn copy_object(
     })
     .map_err(S3Error::internal)?;
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
-        .header("content-type", "application/xml")
-        .body(Body::from(xml))
-        .unwrap())
+        .header("content-type", "application/xml");
+    if let Some(vid) = &result.version_id {
+        builder = builder.header("x-amz-version-id", vid.as_str());
+    }
+    Ok(builder.body(Body::from(xml)).unwrap())
 }
 
 /// Convert ISO 8601 timestamp to HTTP date (RFC 7231) for Last-Modified header.
@@ -288,53 +292,84 @@ pub async fn get_object(
         }
     }
 
-    let (reader, meta) = state
-        .storage
-        .get_object(&bucket, &key)
-        .await
-        .map_err(|e| match e {
-            StorageError::NotFound(_) => S3Error::no_such_key(&key),
-            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
-            _ => S3Error::internal(e),
-        })?;
+    let (reader, meta) = if let Some(version_id) = params.get("versionId") {
+        state
+            .storage
+            .get_object_version(&bucket, &key, version_id)
+            .await
+            .map_err(|e| match e {
+                StorageError::VersionNotFound(_) => S3Error::no_such_version(version_id),
+                StorageError::NotFound(_) => S3Error::no_such_key(&key),
+                StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+                _ => S3Error::internal(e),
+            })?
+    } else {
+        state
+            .storage
+            .get_object(&bucket, &key)
+            .await
+            .map_err(|e| match e {
+                StorageError::NotFound(_) => S3Error::no_such_key(&key),
+                StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+                _ => S3Error::internal(e),
+            })?
+    };
 
     let stream = ReaderStream::new(reader);
     let body = Body::from_stream(stream);
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", &meta.content_type)
         .header("Content-Length", meta.size.to_string())
         .header("Accept-Ranges", "bytes")
         .header("ETag", &meta.etag)
-        .header("Last-Modified", to_http_date(&meta.last_modified))
-        .body(body)
-        .unwrap())
+        .header("Last-Modified", to_http_date(&meta.last_modified));
+    if let Some(vid) = &meta.version_id {
+        builder = builder.header("x-amz-version-id", vid.as_str());
+    }
+    Ok(builder.body(body).unwrap())
 }
 
 pub async fn head_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, S3Error> {
-    let meta = state
-        .storage
-        .head_object(&bucket, &key)
-        .await
-        .map_err(|e| match e {
-            StorageError::NotFound(_) => S3Error::no_such_key(&key),
-            StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
-            _ => S3Error::internal(e),
-        })?;
+    let meta = if let Some(version_id) = params.get("versionId") {
+        state
+            .storage
+            .head_object_version(&bucket, &key, version_id)
+            .await
+            .map_err(|e| match e {
+                StorageError::VersionNotFound(_) => S3Error::no_such_version(version_id),
+                StorageError::NotFound(_) => S3Error::no_such_key(&key),
+                StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+                _ => S3Error::internal(e),
+            })?
+    } else {
+        state
+            .storage
+            .head_object(&bucket, &key)
+            .await
+            .map_err(|e| match e {
+                StorageError::NotFound(_) => S3Error::no_such_key(&key),
+                StorageError::InvalidKey(msg) => S3Error::invalid_argument(&msg),
+                _ => S3Error::internal(e),
+            })?
+    };
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", &meta.content_type)
         .header("Content-Length", meta.size.to_string())
         .header("ETag", &meta.etag)
         .header("Last-Modified", to_http_date(&meta.last_modified))
-        .header("Accept-Ranges", "bytes")
-        .body(Body::empty())
-        .unwrap())
+        .header("Accept-Ranges", "bytes");
+    if let Some(vid) = &meta.version_id {
+        builder = builder.header("x-amz-version-id", vid.as_str());
+    }
+    Ok(builder.body(Body::empty()).unwrap())
 }
 
 pub async fn delete_object(
@@ -347,13 +382,36 @@ pub async fn delete_object(
             .await;
     }
 
-    state.storage.delete_object(&bucket, &key).await
+    // Permanent version deletion
+    if let Some(version_id) = params.get("versionId") {
+        let deleted_meta = state
+            .storage
+            .delete_object_version(&bucket, &key, version_id)
+            .await
+            .map_err(|e| match e {
+                StorageError::VersionNotFound(_) => S3Error::no_such_version(version_id),
+                _ => S3Error::internal(e),
+            })?;
+
+        let mut builder = Response::builder().status(StatusCode::NO_CONTENT);
+        builder = builder.header("x-amz-version-id", version_id.as_str());
+        if deleted_meta.is_delete_marker {
+            builder = builder.header("x-amz-delete-marker", "true");
+        }
+        return Ok(builder.body(Body::empty()).unwrap());
+    }
+
+    let result = state.storage.delete_object(&bucket, &key).await
         .map_err(|e| S3Error::internal(e))?;
 
-    Ok(Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap())
+    let mut builder = Response::builder().status(StatusCode::NO_CONTENT);
+    if let Some(vid) = &result.version_id {
+        builder = builder.header("x-amz-version-id", vid.as_str());
+    }
+    if result.is_delete_marker {
+        builder = builder.header("x-amz-delete-marker", "true");
+    }
+    Ok(builder.body(Body::empty()).unwrap())
 }
 
 pub async fn post_object(
@@ -428,11 +486,19 @@ pub async fn delete_objects(
     while let Some(result) = set.join_next().await {
         if let Ok((key, delete_result)) = result {
             match delete_result {
-                Ok(()) => {
-                    deleted_xml.push_str(&format!(
-                        "<Deleted><Key>{}</Key></Deleted>",
+                Ok(dr) => {
+                    let mut entry = format!(
+                        "<Deleted><Key>{}</Key>",
                         quick_xml::escape::escape(&key)
-                    ));
+                    );
+                    if let Some(vid) = &dr.version_id {
+                        entry.push_str(&format!("<VersionId>{}</VersionId>", vid));
+                    }
+                    if dr.is_delete_marker {
+                        entry.push_str("<DeleteMarker>true</DeleteMarker>");
+                    }
+                    entry.push_str("</Deleted>");
+                    deleted_xml.push_str(&entry);
                 }
                 Err(e) => {
                     error_xml.push_str(&format!(

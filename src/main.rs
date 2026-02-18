@@ -9,6 +9,7 @@ mod xml;
 
 use clap::Parser;
 use config::Config;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
@@ -27,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let state = server::AppState {
         storage: Arc::new(storage),
         config: Arc::new(config.clone()),
+        login_rate_limiter: Arc::new(api::console::LoginRateLimiter::new()),
     };
 
     let app = server::build_router(state);
@@ -41,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let display_host = if config.address == "0.0.0.0" { "localhost" } else { &config.address };
     tracing::info!("Web UI:     http://{}:{}/ui/", display_host, config.port);
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

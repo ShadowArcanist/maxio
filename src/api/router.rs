@@ -11,8 +11,8 @@ pub fn s3_router() -> Router<AppState> {
     Router::new()
         .route("/", get(bucket::list_buckets))
         // Bucket routes — with and without trailing slash
-        .route("/{bucket}", put(bucket::create_bucket))
-        .route("/{bucket}/", put(bucket::create_bucket))
+        .route("/{bucket}", put(bucket::handle_bucket_put))
+        .route("/{bucket}/", put(bucket::handle_bucket_put))
         .route("/{bucket}", head(bucket::head_bucket))
         .route("/{bucket}/", head(bucket::head_bucket))
         .route("/{bucket}", delete(bucket::delete_bucket))

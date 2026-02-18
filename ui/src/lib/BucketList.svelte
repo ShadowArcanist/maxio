@@ -6,15 +6,19 @@
   import Database from 'lucide-svelte/icons/database'
   import Plus from 'lucide-svelte/icons/plus'
   import Trash2 from 'lucide-svelte/icons/trash-2'
+  import Settings from 'lucide-svelte/icons/settings'
+  import { toast } from '$lib/toast'
 
   interface Props {
     onSelect: (bucket: string) => void
+    onSettings: (bucket: string) => void
   }
-  let { onSelect }: Props = $props()
+  let { onSelect, onSettings }: Props = $props()
 
   interface Bucket {
     name: string
     createdAt: string
+    versioning: boolean
   }
 
   let buckets = $state<Bucket[]>([])
@@ -23,6 +27,10 @@
   let showCreate = $state(false)
   let newBucketName = $state('')
   let creating = $state(false)
+
+  function autofocus(node: HTMLElement) {
+    node.focus()
+  }
 
   async function fetchBuckets() {
     loading = true
@@ -46,24 +54,25 @@
   async function createBucket() {
     if (!newBucketName.trim()) return
     creating = true
-    error = null
     try {
+      const name = newBucketName.trim()
       const res = await fetch('/api/buckets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newBucketName.trim() }),
+        body: JSON.stringify({ name }),
       })
       if (res.ok) {
+        toast.success(`Bucket "${name}" created`)
         newBucketName = ''
         showCreate = false
         await fetchBuckets()
       } else {
         const data = await res.json()
-        error = data.error || `Failed to create bucket (${res.status})`
+        toast.error(data.error || `Failed to create bucket (${res.status})`)
       }
     } catch (err) {
       console.error('createBucket failed:', err)
-      error = 'Failed to connect to server'
+      toast.error('Failed to connect to server')
     } finally {
       creating = false
     }
@@ -72,18 +81,18 @@
   async function deleteBucket(name: string, e: Event) {
     e.stopPropagation()
     if (!confirm(`Delete bucket "${name}"? This cannot be undone.`)) return
-    error = null
     try {
       const res = await fetch(`/api/buckets/${encodeURIComponent(name)}`, { method: 'DELETE' })
       if (res.ok) {
+        toast.success(`Bucket "${name}" deleted`)
         await fetchBuckets()
       } else {
         const data = await res.json()
-        error = data.error || `Failed to delete bucket (${res.status})`
+        toast.error(data.error || `Failed to delete bucket (${res.status})`)
       }
     } catch (err) {
       console.error('deleteBucket failed:', err)
-      error = 'Failed to connect to server'
+      toast.error('Failed to connect to server')
     }
   }
 
@@ -108,11 +117,12 @@
   <div class="flex items-center gap-2">
     {#if showCreate}
       <form onsubmit={(e) => { e.preventDefault(); createBucket() }} class="flex items-center gap-2">
-        <Input
+        <input
+          use:autofocus
           type="text"
           bind:value={newBucketName}
           placeholder="bucket-name"
-          class="h-8 w-48"
+          class="input-cool h-8 w-48"
           disabled={creating}
         />
         <Button type="submit" variant="brand" class="h-8" disabled={creating || !newBucketName.trim()}>
@@ -141,23 +151,40 @@
       <Table.Header>
         <Table.Row>
           <Table.Head>Name</Table.Head>
+          <Table.Head>Versioning</Table.Head>
           <Table.Head>Created</Table.Head>
-          <Table.Head class="w-10"></Table.Head>
+          <Table.Head class="w-20"></Table.Head>
         </Table.Row>
       </Table.Header>
       <Table.Body>
         {#each buckets as bucket}
           <Table.Row class="cursor-pointer" onclick={() => onSelect(bucket.name)}>
             <Table.Cell class="font-medium">{bucket.name}</Table.Cell>
+            <Table.Cell>
+              {#if bucket.versioning}
+                <span class="inline-flex items-center rounded-sm bg-green-500/10 px-1.5 py-0.5 text-[11px] font-medium text-green-500">Enabled</span>
+              {:else}
+                <span class="text-xs text-muted-foreground">Off</span>
+              {/if}
+            </Table.Cell>
             <Table.Cell class="text-muted-foreground">{formatDate(bucket.createdAt)}</Table.Cell>
-            <Table.Cell class="w-10">
-              <button
-                class="text-muted-foreground hover:text-destructive transition-colors"
-                onclick={(e) => deleteBucket(bucket.name, e)}
-                title="Delete bucket"
-              >
-                <Trash2 class="size-4" />
-              </button>
+            <Table.Cell class="w-20">
+              <div class="flex items-center gap-4">
+                <button
+                  class="text-muted-foreground hover:text-foreground transition-colors"
+                  onclick={(e: Event) => { e.stopPropagation(); onSettings(bucket.name) }}
+                  title="Bucket settings"
+                >
+                  <Settings class="size-4" />
+                </button>
+                <button
+                  class="text-muted-foreground hover:text-destructive transition-colors"
+                  onclick={(e: Event) => deleteBucket(bucket.name, e)}
+                  title="Delete bucket"
+                >
+                  <Trash2 class="size-4" />
+                </button>
+              </div>
             </Table.Cell>
           </Table.Row>
         {/each}

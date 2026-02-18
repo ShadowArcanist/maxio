@@ -32,6 +32,7 @@ async fn start_server() -> (String, TempDir) {
     let state = AppState {
         storage: Arc::new(storage),
         config: Arc::new(config),
+        login_rate_limiter: Arc::new(maxio::api::console::LoginRateLimiter::new()),
     };
 
     let app = server::build_router(state);

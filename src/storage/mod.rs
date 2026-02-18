@@ -9,6 +9,16 @@ pub type ByteStream = Pin<Box<dyn AsyncRead + Send>>;
 pub struct PutResult {
     pub size: u64,
     pub etag: String,
+    pub version_id: Option<String>,
+}
+
+pub struct DeleteResult {
+    pub version_id: Option<String>,
+    pub is_delete_marker: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +26,8 @@ pub struct BucketMeta {
     pub name: String,
     pub created_at: String,
     pub region: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub versioning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +37,10 @@ pub struct ObjectMeta {
     pub etag: String,
     pub content_type: String,
     pub last_modified: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_delete_marker: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,4 +74,6 @@ pub enum StorageError {
     InvalidKey(String),
     #[error("Multipart upload not found: {0}")]
     UploadNotFound(String),
+    #[error("Version not found: {0}")]
+    VersionNotFound(String),
 }

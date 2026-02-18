@@ -24,6 +24,7 @@ pub enum S3ErrorCode {
     NoSuchBucket,
     NoSuchKey,
     NoSuchUpload,
+    NoSuchVersion,
     InvalidRange,
     NotImplemented,
     EntityTooSmall,
@@ -47,6 +48,7 @@ impl S3ErrorCode {
             Self::NoSuchBucket => "NoSuchBucket",
             Self::NoSuchKey => "NoSuchKey",
             Self::NoSuchUpload => "NoSuchUpload",
+            Self::NoSuchVersion => "NoSuchVersion",
             Self::InvalidRange => "InvalidRange",
             Self::NotImplemented => "NotImplemented",
             Self::EntityTooSmall => "EntityTooSmall",
@@ -61,7 +63,9 @@ impl S3ErrorCode {
             | Self::ExpiredPresignedUrl
             | Self::InvalidAccessKeyId
             | Self::SignatureDoesNotMatch => StatusCode::FORBIDDEN,
-            Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload => StatusCode::NOT_FOUND,
+            Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload | Self::NoSuchVersion => {
+                StatusCode::NOT_FOUND
+            }
             Self::BucketAlreadyOwnedByYou | Self::BucketNotEmpty => StatusCode::CONFLICT,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::InvalidRange => StatusCode::RANGE_NOT_SATISFIABLE,
@@ -203,6 +207,14 @@ impl S3Error {
             code: S3ErrorCode::InvalidAccessKeyId,
             message: "The AWS Access Key Id you provided does not exist in our records.".into(),
             resource: None,
+        }
+    }
+
+    pub fn no_such_version(version_id: &str) -> Self {
+        Self {
+            code: S3ErrorCode::NoSuchVersion,
+            message: "The specified version does not exist.".into(),
+            resource: Some(version_id.to_string()),
         }
     }
 

@@ -3,6 +3,7 @@
   import Login from "./lib/Login.svelte";
   import BucketList from "./lib/BucketList.svelte";
   import ObjectBrowser from "./lib/ObjectBrowser.svelte";
+  import BucketSettings from "./lib/BucketSettings.svelte";
   import Home from "lucide-svelte/icons/home";
   import LogOut from "lucide-svelte/icons/log-out";
   import PanelLeftClose from "lucide-svelte/icons/panel-left-close";
@@ -12,10 +13,12 @@
   import ChevronRight from "lucide-svelte/icons/chevron-right";
   import Sun from "lucide-svelte/icons/sun";
   import Moon from "lucide-svelte/icons/moon";
+  import { Sonner } from "$lib/components/ui/sonner";
 
   let authenticated = $state<boolean | null>(null);
   let collapsed = $state(localStorage.getItem("sidebar-collapsed") === "true");
   let selectedBucket = $state<string | null>(null);
+  let currentView = $state<"objects" | "settings">("objects");
   let objectBrowserRef = $state<ObjectBrowser | null>(null);
   let currentPrefix = $state("");
   let currentBreadcrumbs = $state<{ label: string; prefix: string }[]>([]);
@@ -33,18 +36,26 @@
     const hash = window.location.hash.slice(1) || "/";
     if (hash === "/") {
       selectedBucket = null;
+      currentView = "objects";
       currentPrefix = "";
       currentBreadcrumbs = [];
     } else {
       const parts = hash.slice(1).split("/"); // remove leading /
       const bucket = decodeURIComponent(parts[0]);
-      const prefix = parts.slice(1).join("/");
+      const rest = parts.slice(1).join("/");
       selectedBucket = bucket;
-      if (prefix) {
-        if (objectBrowserRef) {
-          objectBrowserRef.navigateTo(prefix);
-        } else {
-          pendingPrefix = prefix;
+      if (rest === "settings") {
+        currentView = "settings";
+        currentPrefix = "";
+        currentBreadcrumbs = [];
+      } else {
+        currentView = "objects";
+        if (rest) {
+          if (objectBrowserRef) {
+            objectBrowserRef.navigateTo(rest);
+          } else {
+            pendingPrefix = rest;
+          }
         }
       }
     }
@@ -95,13 +106,23 @@
 
   function selectBucket(name: string) {
     selectedBucket = name;
+    currentView = "objects";
     currentPrefix = "";
     currentBreadcrumbs = [];
     updateHash();
   }
 
+  function goToSettings(name: string) {
+    selectedBucket = name;
+    currentView = "settings";
+    currentPrefix = "";
+    currentBreadcrumbs = [];
+    window.location.hash = `/${encodeURIComponent(name)}/settings`;
+  }
+
   function goHome() {
     selectedBucket = null;
+    currentView = "objects";
     currentPrefix = "";
     currentBreadcrumbs = [];
     updateHash();
@@ -147,10 +168,7 @@
         class:justify-center={collapsed}
         style="border-bottom: 1px solid var(--cool-sidebar-border);"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" class="size-6 shrink-0">
-          <rect width="32" height="32" rx="6" fill="#6b16ed"/>
-          <text x="16" y="23" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700" fill="white">M</text>
-        </svg>
+        <img src="/ui/maxio.png" alt="MaxIO" class="size-6 shrink-0" />
         {#if !collapsed}
           <span
             class="ml-2 text-lg font-bold tracking-tight text-foreground whitespace-nowrap"
@@ -217,7 +235,13 @@
       >
         {#if selectedBucket}
           <button
-            onclick={() => objectBrowserRef?.goUp()}
+            onclick={() => {
+              if (currentView === "settings") {
+                goHome();
+              } else {
+                objectBrowserRef?.goUp();
+              }
+            }}
             class="shrink-0 rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
           >
             <ArrowLeft class="size-4" />
@@ -228,7 +252,14 @@
               onclick={goHome}>Buckets</button
             >
             <ChevronRight class="size-3 shrink-0 text-muted-foreground" />
-            {#if currentBreadcrumbs.length > 1}
+            {#if currentView === "settings"}
+              <button
+                class="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                onclick={() => selectBucket(selectedBucket!)}
+              >{selectedBucket}</button>
+              <ChevronRight class="size-3 shrink-0 text-muted-foreground" />
+              <span class="font-semibold shrink-0">Settings</span>
+            {:else if currentBreadcrumbs.length > 1}
               {#each currentBreadcrumbs as crumb, i}
                 {#if i < currentBreadcrumbs.length - 1}
                   <button
@@ -250,7 +281,12 @@
       </div>
       <!-- Scrollable content -->
       <div class="flex-1 overflow-auto p-6">
-        {#if selectedBucket}
+        {#if selectedBucket && currentView === "settings"}
+          <BucketSettings
+            bucket={selectedBucket}
+            onBack={() => selectBucket(selectedBucket!)}
+          />
+        {:else if selectedBucket}
           <ObjectBrowser
             bind:this={objectBrowserRef}
             bucket={selectedBucket}
@@ -258,9 +294,10 @@
             onPrefixChange={handlePrefixChange}
           />
         {:else}
-          <BucketList onSelect={selectBucket} />
+          <BucketList onSelect={selectBucket} onSettings={goToSettings} />
         {/if}
       </div>
     </main>
   </div>
+  <Sonner theme={isDark ? 'dark' : 'light'} />
 {/if}

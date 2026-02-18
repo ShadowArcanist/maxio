@@ -19,6 +19,7 @@ MaxIO is a lightweight, single-binary S3-compatible object storage server writte
 - **AWS Signature V4** — Compatible with `mc`, AWS CLI, and any S3 SDK
 - **Web Console** — Built-in UI at `/ui/` for browsing, uploading, and managing objects
 - **S3 API Coverage** — ListBuckets, CreateBucket, HeadBucket, DeleteBucket, GetBucketLocation, ListObjectsV1/V2, PutObject, GetObject, HeadObject, DeleteObject, DeleteObjects (batch)
+- **Range Requests** — HTTP 206 Partial Content support via `Range` header on GetObject
 
 ## Installation
 
@@ -79,7 +80,7 @@ aws --endpoint-url http://localhost:9000 s3 rb s3://my-bucket
 ## Roadmap
 
 - Multipart upload, presigned URLs, CopyObject
-- CORS, Range headers
+- CORS, ~~Range headers~~
 - Versioning, lifecycle rules
 - Multi-user support
 - Distributed mode, erasure coding, replication

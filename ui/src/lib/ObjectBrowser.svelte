@@ -10,6 +10,9 @@
   import Share2 from 'lucide-svelte/icons/share-2'
   import Check from 'lucide-svelte/icons/check'
   import FolderPlus from 'lucide-svelte/icons/folder-plus'
+  import History from 'lucide-svelte/icons/history'
+  import VersionHistory from './VersionHistory.svelte'
+  import { toast } from '$lib/toast'
 
   interface Props {
     bucket: string
@@ -38,7 +41,13 @@
   let showCreateFolder = $state(false)
   let newFolderName = $state('')
   let creatingFolder = $state(false)
+
+  function autofocus(node: HTMLElement) {
+    node.focus()
+  }
   let shareMenuPos = $state({ top: 0, left: 0 })
+  let versioningEnabled = $state(false)
+  let versionKey = $state<string | null>(null)
 
   const expiryOptions = [
     { label: '1 hour', seconds: 3600 },
@@ -133,7 +142,11 @@
     const inputFiles = fileInput?.files
     if (!inputFiles || inputFiles.length === 0) return
     uploading = true
-    error = null
+    const toastId = toast.loading(
+      inputFiles.length === 1
+        ? `Uploading ${inputFiles[0].name}…`
+        : `Uploading ${inputFiles.length} files…`
+    )
     try {
       for (const file of inputFiles) {
         const key = `${prefix}${file.name}`
@@ -144,15 +157,23 @@
         })
         if (!res.ok) {
           const data = await res.json()
-          error = data.error || `Failed to upload ${file.name}`
-          break
+          toast.error(data.error || `Failed to upload ${file.name}`, { id: toastId })
+          if (fileInput) fileInput.value = ''
+          uploading = false
+          return
         }
       }
+      toast.success(
+        inputFiles.length === 1
+          ? `${inputFiles[0].name} uploaded`
+          : `${inputFiles.length} files uploaded`,
+        { id: toastId }
+      )
       if (fileInput) fileInput.value = ''
       await fetchObjects()
     } catch (err) {
       console.error('Upload failed:', err)
-      error = 'Failed to upload file'
+      toast.error('Upload failed', { id: toastId })
     } finally {
       uploading = false
     }
@@ -161,18 +182,18 @@
   async function deleteObject(key: string, e: Event) {
     e.stopPropagation()
     if (!confirm(`Delete "${displayName(key)}"?`)) return
-    error = null
     try {
       const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/objects/${key}`, { method: 'DELETE' })
       if (res.ok) {
+        toast.success(`"${displayName(key)}" deleted`)
         await fetchObjects()
       } else {
         const data = await res.json()
-        error = data.error || `Failed to delete object`
+        toast.error(data.error || 'Failed to delete object')
       }
     } catch (err) {
       console.error('deleteObject failed:', err)
-      error = 'Failed to connect to server'
+      toast.error('Failed to connect to server')
     }
   }
 
@@ -190,22 +211,22 @@
 
   async function shareObject(key: string, expires: number) {
     shareMenuKey = null
-    error = null
     try {
       const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/presign/${key}?expires=${expires}`)
       if (!res.ok) {
         const data = await res.json()
         console.error('Presign failed:', res.status, data)
-        error = data.error || 'Failed to generate share link'
+        toast.error(data.error || 'Failed to generate share link')
         return
       }
       const data = await res.json()
       await navigator.clipboard.writeText(data.url)
       copiedKey = key
       setTimeout(() => { copiedKey = null }, 2000)
+      toast.success('Presigned URL copied to clipboard')
     } catch (err) {
       console.error('shareObject failed:', err)
-      error = 'Failed to generate share link'
+      toast.error('Failed to generate share link')
     }
   }
 
@@ -213,7 +234,6 @@
     const name = newFolderName.trim()
     if (!name) return
     creatingFolder = true
-    error = null
     try {
       const fullName = `${prefix}${name}`
       const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/folders`, {
@@ -222,16 +242,17 @@
         body: JSON.stringify({ name: fullName }),
       })
       if (res.ok) {
+        toast.success(`Folder "${name}" created`)
         newFolderName = ''
         showCreateFolder = false
         await fetchObjects()
       } else {
         const data = await res.json()
-        error = data.error || 'Failed to create folder'
+        toast.error(data.error || 'Failed to create folder')
       }
     } catch (err) {
       console.error('createFolder failed:', err)
-      error = 'Failed to create folder'
+      toast.error('Failed to create folder')
     } finally {
       creatingFolder = false
     }
@@ -240,18 +261,30 @@
   async function deleteFolder(folderPrefix: string, e: Event) {
     e.stopPropagation()
     if (!confirm(`Delete empty folder "${displayName(folderPrefix)}"?`)) return
-    error = null
     try {
       const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/objects/${folderPrefix}`, { method: 'DELETE' })
       if (res.ok) {
+        toast.success(`Folder "${displayName(folderPrefix)}" deleted`)
         await fetchObjects()
       } else {
         const data = await res.json()
-        error = data.error || 'Failed to delete folder'
+        toast.error(data.error || 'Failed to delete folder')
       }
     } catch (err) {
       console.error('deleteFolder failed:', err)
-      error = 'Failed to delete folder'
+      toast.error('Failed to delete folder')
+    }
+  }
+
+  async function fetchVersioning() {
+    try {
+      const res = await fetch(`/api/buckets/${encodeURIComponent(bucket)}/versioning`)
+      if (res.ok) {
+        const data = await res.json()
+        versioningEnabled = data.enabled
+      }
+    } catch (err) {
+      console.error('fetchVersioning failed:', err)
     }
   }
 
@@ -261,6 +294,7 @@
 
   onMount(() => {
     fetchObjects()
+    fetchVersioning()
     document.addEventListener('click', handleClickOutside)
     return () => document.removeEventListener('click', handleClickOutside)
   })
@@ -287,6 +321,7 @@
     {#if showCreateFolder}
       <form onsubmit={(e) => { e.preventDefault(); createFolder() }} class="flex items-center gap-2">
         <input
+          use:autofocus
           type="text"
           bind:value={newFolderName}
           placeholder="folder-name"
@@ -359,7 +394,16 @@
             <Table.Cell class="text-right text-muted-foreground">{formatSize(file.size)}</Table.Cell>
             <Table.Cell class="text-muted-foreground">{formatDate(file.lastModified)}</Table.Cell>
             <Table.Cell class="w-24">
-              <span class="flex items-center gap-3">
+              <span class="flex items-center gap-4">
+                {#if versioningEnabled}
+                  <button
+                    class="text-muted-foreground hover:text-foreground transition-colors"
+                    onclick={(e) => { e.stopPropagation(); versionKey = versionKey === file.key ? null : file.key }}
+                    title="Version history"
+                  >
+                    <History class="size-4" />
+                  </button>
+                {/if}
                 <button
                   class="text-muted-foreground hover:text-foreground transition-colors"
                   onclick={(e) => toggleShareMenu(file.key, e)}
@@ -384,6 +428,20 @@
               </span>
             </Table.Cell>
           </Table.Row>
+          {#if versionKey === file.key}
+            <Table.Row>
+              <Table.Cell colspan={4} class="p-0">
+                <div class="p-2">
+                  <VersionHistory
+                    {bucket}
+                    objectKey={file.key}
+                    onClose={() => (versionKey = null)}
+                    onVersionDeleted={() => fetchObjects()}
+                  />
+                </div>
+              </Table.Cell>
+            </Table.Row>
+          {/if}
         {/each}
       </Table.Body>
     </Table.Root>
