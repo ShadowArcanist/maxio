@@ -36,7 +36,9 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.address, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     if config.access_key == "minioadmin" && config.secret_key == "minioadmin" {
-        tracing::warn!("WARNING: Using default credentials. Set MAXIO_ACCESS_KEY and MAXIO_SECRET_KEY for production use.");
+        tracing::warn!(
+            "WARNING: Using default credentials. Set MAXIO_ACCESS_KEY/MAXIO_SECRET_KEY (or MINIO_ROOT_USER/MINIO_ROOT_PASSWORD) for production use."
+        );
     }
 
     tracing::info!("MaxIO v{} listening on {}", env!("MAXIO_VERSION"), addr);

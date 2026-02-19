@@ -1,4 +1,25 @@
 use clap::Parser;
+use std::env;
+
+fn first_env_value(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))
+}
+
+fn default_access_key() -> String {
+    first_env_value(&["MINIO_ROOT_USER", "MINIO_ACCESS_KEY"])
+        .unwrap_or_else(|| "minioadmin".to_string())
+}
+
+fn default_secret_key() -> String {
+    first_env_value(&["MINIO_ROOT_PASSWORD", "MINIO_SECRET_KEY"])
+        .unwrap_or_else(|| "minioadmin".to_string())
+}
+
+fn default_region() -> String {
+    first_env_value(&["MINIO_REGION_NAME", "MINIO_REGION"])
+        .unwrap_or_else(|| "us-east-1".to_string())
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "maxio", about = "S3-compatible object storage server", version = env!("MAXIO_VERSION"))]
@@ -15,15 +36,15 @@ pub struct Config {
     #[arg(long, env = "MAXIO_DATA_DIR", default_value = "./data")]
     pub data_dir: String,
 
-    /// Access key (like AWS_ACCESS_KEY_ID)
-    #[arg(long, env = "MAXIO_ACCESS_KEY", default_value = "minioadmin")]
+    /// Access key (MAXIO_ACCESS_KEY, MINIO_ROOT_USER, MINIO_ACCESS_KEY)
+    #[arg(long, env = "MAXIO_ACCESS_KEY", default_value_t = default_access_key())]
     pub access_key: String,
 
-    /// Secret key (like AWS_SECRET_ACCESS_KEY)
-    #[arg(long, env = "MAXIO_SECRET_KEY", default_value = "minioadmin")]
+    /// Secret key (MAXIO_SECRET_KEY, MINIO_ROOT_PASSWORD, MINIO_SECRET_KEY)
+    #[arg(long, env = "MAXIO_SECRET_KEY", default_value_t = default_secret_key())]
     pub secret_key: String,
 
-    /// Default region
-    #[arg(long, env = "MAXIO_REGION", default_value = "us-east-1")]
+    /// Default region (MAXIO_REGION, MINIO_REGION_NAME, MINIO_REGION)
+    #[arg(long, env = "MAXIO_REGION", default_value_t = default_region())]
     pub region: String,
 }

@@ -95,9 +95,9 @@ Open `http://localhost:9000/ui/` in your browser. Default credentials: `minioadm
 | `MAXIO_PORT` | `--port` | `9000` | Listen port |
 | `MAXIO_ADDRESS` | `--address` | `0.0.0.0` | Bind address |
 | `MAXIO_DATA_DIR` | `--data-dir` | `./data` | Storage directory |
-| `MAXIO_ACCESS_KEY` | `--access-key` | `minioadmin` | Access key |
-| `MAXIO_SECRET_KEY` | `--secret-key` | `minioadmin` | Secret key |
-| `MAXIO_REGION` | `--region` | `us-east-1` | S3 region |
+| `MAXIO_ACCESS_KEY` | `--access-key` | `minioadmin` | Access key (aliases: `MINIO_ROOT_USER`, `MINIO_ACCESS_KEY`) |
+| `MAXIO_SECRET_KEY` | `--secret-key` | `minioadmin` | Secret key (aliases: `MINIO_ROOT_PASSWORD`, `MINIO_SECRET_KEY`) |
+| `MAXIO_REGION` | `--region` | `us-east-1` | S3 region (aliases: `MINIO_REGION_NAME`, `MINIO_REGION`) |
 
 ## Usage
 
